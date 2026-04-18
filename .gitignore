@@ -7,7 +7,6 @@ obj/
 *.userosscache
 *.sln.docstates
 .vs/
-*.exe
 *.dll
 *.pdb
 

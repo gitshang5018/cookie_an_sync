@@ -50,7 +50,7 @@
             <Grid Grid.Row="0">
                 <StackPanel Orientation="Horizontal" Margin="18,0">
                     <Image Source="icon.ico" Width="22" Height="22" Margin="0,0,12,0" RenderOptions.BitmapScalingMode="HighQuality"/>
-                    <TextBlock Text="COOKIE SYNC RELAY" Foreground="White" VerticalAlignment="Center" FontWeight="Bold" FontSize="13"/>
+                    <TextBlock Text="Cookie 同步中继服务" Foreground="White" VerticalAlignment="Center" FontWeight="Bold" FontSize="13"/>
                 </StackPanel>
                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" WindowChrome.IsHitTestVisibleInChrome="True">
                     <Button Content="" FontFamily="Segoe MDL2 Assets" Width="48" Height="48" Background="Transparent" Foreground="#94a3b8" BorderThickness="0" Click="Minimize_Click" FontSize="11">
@@ -133,23 +133,27 @@
 
             <!-- Glass Interaction Panel -->
             <Grid Grid.Row="2" Margin="28,12">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
                 
-                <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                <StackPanel Grid.Row="0" Grid.Column="0" VerticalAlignment="Center">
                     <Border Background="#020617" CornerRadius="10" BorderThickness="1" BorderBrush="#334155" Height="42">
                         <StackPanel Orientation="Horizontal">
                             <Border Width="4" Background="#6366f1" CornerRadius="4,0,0,4"/>
-                            <TextBlock Text="PORT" Foreground="#475569" FontWeight="Black" FontSize="9" VerticalAlignment="Center" Margin="14,0,10,0"/>
+                            <TextBlock Text="监听端口" Foreground="#475569" FontWeight="Black" FontSize="9" VerticalAlignment="Center" Margin="14,0,10,0"/>
                             <TextBox x:Name="InputPort" Text="3000" Width="60" VerticalAlignment="Center" Background="Transparent" Foreground="White" BorderThickness="0" FontSize="15" FontWeight="Bold" CaretBrush="White"/>
                         </StackPanel>
                     </Border>
                     <CheckBox x:Name="ChkAutoStart" Content="开机自动启动" Foreground="#94a3b8" FontSize="11" Margin="4,8,0,0" Click="AutoStart_Click" Cursor="Hand"/>
                 </StackPanel>
 
-                <Button x:Name="BtnToggle" Grid.Row="0" Grid.Column="1" Content="启动中转服务" Click="ToggleServer_Click" Width="140" Height="42" Foreground="White" BorderThickness="0" FontWeight="Bold" FontSize="13">
+                <Button x:Name="BtnToggle" Grid.Row="0" Grid.Column="1" VerticalAlignment="Top" Content="启动中转服务" Click="ToggleServer_Click" Width="140" Height="42" Foreground="White" BorderThickness="0" FontWeight="Bold" FontSize="13">
                     <Button.Style>
                         <Style TargetType="Button">
                             <Setter Property="Background" Value="#6366f1"/>
@@ -168,6 +172,56 @@
                         </Style>
                     </Button.Style>
                 </Button>
+
+                <!-- 本机推送面板 -->
+                <StackPanel Grid.Row="1" Grid.ColumnSpan="2" Margin="0,15,0,0">
+                    <Border Height="1" Background="#1e293b" Margin="0,0,0,10"/>
+                    <TextBlock Text="本机 Cookie 推送（每行一个域名）" Foreground="#64748b" FontSize="10" FontWeight="Bold" Margin="0,0,0,8"/>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="10"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        
+                        <Border Grid.Column="0" Background="#020617" CornerRadius="10" BorderThickness="1" BorderBrush="#334155" Padding="4">
+                            <TextBox x:Name="InputDomain" 
+                                     Text="ztupic.com&#x0a;58pic.com&#x0a;redocn.com" 
+                                     AcceptsReturn="True" 
+                                     TextWrapping="Wrap"
+                                     Height="88"
+                                     VerticalScrollBarVisibility="Auto"
+                                     Background="Transparent" 
+                                     Foreground="White" 
+                                     BorderThickness="0" 
+                                     FontSize="13" 
+                                     FontWeight="Bold" 
+                                     CaretBrush="White"
+                                     Padding="10,6"/>
+                        </Border>
+                        
+                        <Button x:Name="BtnPublishLocal" Grid.Column="2" Content="本机推送" Click="PublishLocal_Click" Width="100" Height="88" Foreground="White" BorderThickness="0" FontWeight="Bold" FontSize="13">
+                            <Button.Style>
+                                <Style TargetType="Button">
+                                    <Setter Property="Background" Value="#10b981"/>
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border Background="{TemplateBinding Background}" CornerRadius="10">
+                                                    <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                                                </Border>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                    <Style.Triggers>
+                                        <Trigger Property="IsMouseOver" Value="True"><Setter Property="Background" Value="#059669"/></Trigger>
+                                        <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.5"/></Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                    </Grid>
+                </StackPanel>
             </Grid>
 
             <!-- Cyber Log Console -->

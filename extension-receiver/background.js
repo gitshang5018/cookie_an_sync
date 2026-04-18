@@ -1,30 +1,86 @@
-// Cookie Sync (Receiver 版) - 背景脚本
-// 核心逻辑：建立 WebSocket 长连接，接收更新并写入本地 Cookie
-
+// Cookie Sync (Receiver 版) - 全自动静默发现背景脚本
 let socket = null;
-let reconnectTimer = null;
-let lastProcessedTime = null; // 记录最后一次处理的时间戳标识
+let currentUrl = ''; 
+let isConnected = false;
+let isScanning = false;
+let lastSyncTime = null;
+let lastProcessedTime = null;
 
-chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.action === 'START_LISTENING') {
-        connectWebSocket(msg.serverUrl);
+// 1. 初始化启动
+chrome.storage.local.get(['serverUrl'], (data) => {
+    if (data.serverUrl) {
+        currentUrl = data.serverUrl;
+        connectWebSocket(currentUrl);
+    } else {
+        startSilentDiscovery();
     }
 });
 
-// 保活机制
-chrome.alarms.create('heartbeat', { periodInMinutes: 1 });
-chrome.alarms.onAlarm.addListener((alarm) => {
-    if (alarm.name === 'heartbeat' && !socket) {
-        chrome.storage.local.get(['serverUrl', 'isListening'], (data) => {
-            if (data.isListening && data.serverUrl) {
-                connectWebSocket(data.serverUrl);
+// 2. 消息监听
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'GET_STATUS') {
+        sendResponse({ connected: isConnected, url: currentUrl, lastSync: lastSyncTime, scanning: isScanning });
+        return true; 
+    }
+    if (message.action === 'UPDATE_URL') {
+        currentUrl = message.serverUrl;
+        chrome.storage.local.set({ serverUrl: currentUrl });
+        connectWebSocket(currentUrl);
+        sendResponse({ success: true });
+        return true;
+    }
+});
+
+// 3. 全自动静默发现引擎
+async function startSilentDiscovery() {
+    if (isScanning || isConnected) return;
+    isScanning = true;
+    console.log('Receiver starting silent discovery...');
+
+    const subnets = ['127.0.0.1', '192.168.0', '192.168.1', '192.168.31', '192.168.2', '10.0.0'];
+    const port = '3000';
+
+    for (const subnet of subnets) {
+        if (isConnected) break;
+        let batchSize = 20;
+        for (let i = 1; i <= 255; i += batchSize) {
+            if (isConnected) break;
+            const promises = [];
+            for (let j = i; j < i + batchSize && j <= 255; j++) {
+                const ip = subnet === '127.0.0.1' ? subnet : `${subnet}.${j}`;
+                promises.push(checkServer(ip, port));
+                if (subnet === '127.0.0.1') break; 
             }
-        });
+            await Promise.all(promises);
+        }
     }
-});
+    
+    isScanning = false;
+    if (!isConnected) {
+        setTimeout(startSilentDiscovery, 5 * 60 * 1000);
+    }
+}
 
-async function connectWebSocket(url) {
+async function checkServer(ip, port) {
+    if (isConnected) return;
+    const url = `${ip}:${port}`;
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 800);
+        const resp = await fetch(`http://${url}/ping`, { signal: controller.signal });
+        const data = await resp.json();
+        if (data && data.app === 'CookieSyncServer') {
+            currentUrl = url;
+            chrome.storage.local.set({ serverUrl: url });
+            connectWebSocket(url);
+        }
+        clearTimeout(timeoutId);
+    } catch (e) {}
+}
+
+function connectWebSocket(url) {
     if (socket) socket.close();
+    if (!url) return;
     
     let wsUrl = url.includes('://') ? url.replace('http', 'ws') : `ws://${url}`;
     if (!wsUrl.includes('/live')) wsUrl = wsUrl.endsWith('/') ? wsUrl + 'live' : wsUrl + '/live';
@@ -32,84 +88,62 @@ async function connectWebSocket(url) {
     socket = new WebSocket(wsUrl);
 
     socket.onopen = () => {
-        console.log('WS Connected');
-        chrome.runtime.sendMessage({ action: 'STATUS_UPDATE', connected: true });
+        isConnected = true;
+        isScanning = false;
+        const hb = setInterval(() => {
+            if (socket && socket.readyState === WebSocket.OPEN) {
+                socket.send('ping');
+            } else {
+                clearInterval(hb);
+            }
+        }, 25000);
     };
 
     socket.onmessage = async (event) => {
+        if (event.data === 'pong') return;
         try {
             const data = JSON.parse(event.data);
             if (data.type === 'UPDATE_COOKIES' || data.type === 'INIT_COOKIES') {
-                // 1. 时间戳前置拦截：如果推送时间没变，则不执行任何同步操作
-                if (data.time && data.time === lastProcessedTime) {
-                    console.log(`[Version Gate] Skipping duplicate sync for time: ${data.time}`);
-                    return;
-                }
-
-                // 2. 执行内容差分同步
+                if (data.time && data.time === lastProcessedTime) return;
                 const changed = await applyCookies(data.cookies);
-                
-                // 3. 只有检测到数据有效变化才触发通知
+                lastSyncTime = new Date().toLocaleTimeString();
                 if (changed) {
-                    lastProcessedTime = data.time; // 更新最后处理的时间戳标识
-                    const time = new Date().toLocaleTimeString();
-                    chrome.storage.local.set({ lastSyncTime: time });
-                    chrome.runtime.sendMessage({ action: 'SYNC_READY', time });
-                    
+                    lastProcessedTime = data.time; 
                     chrome.notifications.create({
                         type: 'basic',
                         iconUrl: 'icons/icon128.png',
                         title: 'Cookie 同步成功',
-                        message: `检测到 ${data.domain} 的数据变化，已更新`
+                        message: `站点 ${data.domain} 已自动同步更新`
                     });
-                } else {
-                    console.log(`[Sync] Skipped redundant update for ${data.domain}`);
                 }
             }
-        } catch (e) { console.error('WS Data Error', e); }
+        } catch (e) {}
     };
 
     socket.onclose = () => {
-        socket = null;
-        chrome.runtime.sendMessage({ action: 'STATUS_UPDATE', connected: false });
-        // 5秒后尝试重连
-        clearTimeout(reconnectTimer);
-        reconnectTimer = setTimeout(() => {
-            chrome.storage.local.get(['isListening', 'serverUrl'], (data) => {
-                if (data.isListening) connectWebSocket(data.serverUrl);
-            });
+        isConnected = false;
+        setTimeout(() => {
+            if (currentUrl) connectWebSocket(currentUrl);
+            else startSilentDiscovery();
         }, 5000);
     };
 }
 
 async function applyCookies(incomingCookies) {
     let changeCount = 0;
-    
     for (const cookie of incomingCookies) {
         const { hostOnly, session, ...cleanCookie } = cookie;
         const protocol = cleanCookie.secure ? 'https://' : 'http://';
         const domain = cleanCookie.domain.startsWith('.') ? cleanCookie.domain.substring(1) : cleanCookie.domain;
         const url = protocol + domain + cleanCookie.path;
         cleanCookie.url = url;
-        
         try {
-            // 1. 获取当前浏览器中的同名 Cookie
-            const existing = await chrome.cookies.get({
-                url: url,
-                name: cleanCookie.name,
-                storeId: cleanCookie.storeId
-            });
-
-            // 2. 只有当值发生变化时才写入
+            const existing = await chrome.cookies.get({ url: url, name: cleanCookie.name, storeId: cleanCookie.storeId });
             if (!existing || existing.value !== cleanCookie.value) {
                 await chrome.cookies.set(cleanCookie);
                 changeCount++;
-                console.log(`[Sync] Updated cookie: ${cleanCookie.name}`);
             }
-        } catch (e) {
-            console.warn('Cookie comparison/set error:', e.message, url);
-        }
+        } catch (e) {}
     }
-
     return changeCount > 0;
 }

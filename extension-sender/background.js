@@ -1,49 +1,136 @@
-// Cookie Sync (Sender 版) - 背景脚本
-// 核心逻辑：响应 Popup 的 SYNC_NOW 指令，抓取并 POST 到中转站
+let socket = null;
+let currentUrl = ''; 
+let isConnected = false;
+let isScanning = false;
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-    if (message.action === 'SYNC_NOW') {
-        handleSync(message.payload).then(sendResponse);
-        return true; // 保持通道异步
+// 1. 初始化启动
+chrome.storage.local.get(['serverUrl'], (data) => {
+    if (data.serverUrl) {
+        currentUrl = data.serverUrl;
+        connectWebSocket(currentUrl);
+    } else {
+        startSilentDiscovery();
     }
 });
 
-async function handleSync(data) {
-    try {
-        const { serverUrl, targetDomain } = data;
-        let fullUrl = serverUrl;
-        if (!fullUrl.startsWith('http')) fullUrl = 'http://' + fullUrl;
-
-        // 整理域名列表
-        const domains = targetDomain.split(',').map(d => d.trim()).filter(d => d);
-        
-        // 抓取逻辑
-        const cookiesToSync = [];
-        for (const domain of domains) {
-            const cookies = await chrome.cookies.getAll({ domain });
-            cookiesToSync.push(...cookies);
-        }
-
-        if (cookiesToSync.length === 0) {
-            return { success: false, error: '未找到相关 Cookie' };
-        }
-
-        // 推送
-        const response = await fetch(`${fullUrl}/update`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                domain: domains.join(', '),
-                cookies: cookiesToSync
-            })
-        });
-
-        if (response.ok) {
-            return { success: true };
-        } else {
-            return { success: false, error: `服务器返回: ${response.status}` };
-        }
-    } catch (e) {
-        return { success: false, error: e.message };
+// 2. 消息监听
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message.action === 'GET_STATUS') {
+        sendResponse({ connected: isConnected, url: currentUrl, scanning: isScanning });
+        return true; 
     }
+    if (message.action === 'UPDATE_URL') {
+        currentUrl = message.serverUrl;
+        chrome.storage.local.set({ serverUrl: currentUrl });
+        connectWebSocket(currentUrl);
+        sendResponse({ success: true });
+        return true;
+    }
+});
+
+// 3. 全自动静默发现引擎
+async function startSilentDiscovery() {
+    if (isScanning || isConnected) return;
+    isScanning = true;
+    console.log('Starting silent discovery...');
+
+    const subnets = ['127.0.0.1', '192.168.0', '192.168.1', '192.168.31', '192.168.2', '10.0.0'];
+    const port = '3000';
+
+    for (const subnet of subnets) {
+        if (isConnected) break;
+        console.log(`Scanning subnet: ${subnet}`);
+        
+        let batchSize = 20;
+        for (let i = 1; i <= 255; i += batchSize) {
+            if (isConnected) break;
+            
+            const promises = [];
+            for (let j = i; j < i + batchSize && j <= 255; j++) {
+                const ip = subnet === '127.0.0.1' ? subnet : `${subnet}.${j}`;
+                promises.push(checkServer(ip, port));
+                if (subnet === '127.0.0.1') break; 
+            }
+            
+            await Promise.all(promises);
+        }
+    }
+    
+    isScanning = false;
+    // 如果没找到，5分钟后重试
+    if (!isConnected) {
+        setTimeout(startSilentDiscovery, 5 * 60 * 1000);
+    }
+}
+
+async function checkServer(ip, port) {
+    if (isConnected) return;
+    const url = `${ip}:${port}`;
+    try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 800);
+        
+        const resp = await fetch(`http://${url}/ping`, { signal: controller.signal });
+        const data = await resp.json();
+        
+        if (data && data.app === 'CookieSyncServer') {
+            console.log(`Found server at: ${url}`);
+            currentUrl = url;
+            chrome.storage.local.set({ serverUrl: url });
+            connectWebSocket(url);
+        }
+        clearTimeout(timeoutId);
+    } catch (e) {
+        // 忽略网络错误
+    }
+}
+
+function connectWebSocket(url) {
+    if (socket) socket.close();
+    if (!url) return;
+    
+    let wsUrl = url.includes('://') ? url.replace('http', 'ws') : `ws://${url}`;
+    if (!wsUrl.includes('/live')) wsUrl = wsUrl.endsWith('/') ? wsUrl + 'live' : wsUrl + '/live';
+
+    socket = new WebSocket(wsUrl);
+
+    socket.onopen = () => {
+        console.log('Sender WS Connected to ' + wsUrl);
+        isConnected = true;
+        isScanning = false;
+    };
+
+    socket.onmessage = async (event) => {
+        try {
+            const data = JSON.parse(event.data);
+            if (data.type === 'EXTRACT_COOKIES_REQUEST' && data.domains) {
+                const cookiesToSync = [];
+                for (const domain of data.domains) {
+                    const cookies = await chrome.cookies.getAll({ domain });
+                    cookiesToSync.push(...cookies);
+                }
+
+                if (cookiesToSync.length > 0) {
+                    const hostUrl = 'http://' + currentUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+                    await fetch(`${hostUrl}/update`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            domain: data.domains.join(', '),
+                            cookies: cookiesToSync
+                        })
+                    });
+                }
+            }
+        } catch (e) {}
+    };
+
+    socket.onclose = () => {
+        isConnected = false;
+        // 断开后尝试重连或重新搜索
+        setTimeout(() => {
+            if (currentUrl) connectWebSocket(currentUrl);
+            else startSilentDiscovery();
+        }, 5000);
+    };
 }

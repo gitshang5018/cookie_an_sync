@@ -1,37 +1,98 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>Cookie Sync (Sender)</title>
-    <link rel="stylesheet" href="style.css">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cookie Sync (Sender Auxiliary)</title>
+    <style>
+        :root {
+            --bg-base: #020617;
+            --bg-card: rgba(15, 23, 42, 0.7);
+            --border-color: #334155;
+            --text-primary: #f8fafc;
+            --text-secondary: #94a3b8;
+            --accent: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: var(--bg-base);
+            color: var(--text-primary);
+            width: 300px;
+            padding: 20px;
+        }
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 1px dashed var(--border-color);
+        }
+        .title h1 { font-size: 1.1rem; color: #fff; }
+        .title .subtitle { font-size: 0.7rem; color: var(--accent); letter-spacing: 1px; }
+        
+        .status-box {
+            background: var(--bg-card);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+        }
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+        }
+        .dot {
+            width: 10px; height: 10px;
+            border-radius: 50%;
+            background: var(--danger);
+            box-shadow: 0 0 8px var(--danger);
+        }
+        .dot.active { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
+        .dot.scanning { background: var(--warning); box-shadow: 0 0 8px var(--warning); animation: pulse 1s infinite; }
+        
+        @keyframes pulse { 0% { opacity: 0.4; } 100% { opacity: 1; } }
+
+        .status-text { font-weight: bold; font-size: 1rem; }
+        
+        .info-area {
+            margin-top: 15px;
+            padding-top: 15px;
+            border-top: 1px solid rgba(255,255,255,0.05);
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+        .ip-label { display: block; margin-bottom: 4px; font-weight: bold; }
+        .ip-val { color: var(--text-primary); font-family: monospace; }
+        
+        .hint { margin-top: 15px; font-size: 0.7rem; opacity: 0.6; font-style: italic; }
+    </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1 class="title">Sync Pusher</h1>
-        </header>
+    <div class="header">
+        <div class="title">
+            <h1>Cookie 辅助采集器</h1>
+            <div class="subtitle">SENDER NODE</div>
+        </div>
+    </div>
+    
+    <div class="status-box">
+        <div class="status-badge">
+            <span id="dot" class="dot"></span>
+            <span id="status-text" class="status-text">初始化...</span>
+        </div>
 
-        <main>
-            <div class="panel">
-                <p class="hint">提取浏览器 Cookie 并推送到局域网中转站进行分布式同步。</p>
-            </div>
-
-            <div class="input-group">
-                <label>中转站地址</label>
-                <input type="text" id="server-url" placeholder="192.168.x.x:3000">
-            </div>
-
-            <div class="input-group">
-                <label>目标域名 (逗号分隔)</label>
-                <input type="text" id="target-domain" placeholder="example.com, site.cn">
-            </div>
-            
-            <button id="btn-sync-now" class="main-btn">立即推送同步</button>
-        </main>
-
-        <footer>
-            <p id="message-area" class="message"></p>
-        </footer>
+        <div id="info-area" class="info-area" style="display: none;">
+            <span class="ip-label">当前连接地址:</span>
+            <span id="server-url" class="ip-val">---</span>
+        </div>
+        
+        <p class="hint">全自动静默运行模式，无需干预。</p>
     </div>
     <script src="popup.js"></script>
 </body>

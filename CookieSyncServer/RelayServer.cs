@@ -83,6 +83,8 @@ namespace CookieSyncServer
                 return Results.Ok(new { status = "success" });
             });
 
+            app.MapGet("/ping", () => Results.Ok(new { status = "ok", app = "CookieSyncServer" }));
+
             app.Map("/live", async (HttpContext context) =>
             {
                 if (context.WebSockets.IsWebSocketRequest)
@@ -103,7 +105,8 @@ namespace CookieSyncServer
                         var initPayloadObj = new { 
                             type = "INIT_COOKIES", 
                             domain = iDomain, 
-                            cookies = iCookies 
+                            cookies = iCookies,
+                            time = DateTime.Now.ToString("HH:mm:ss.fff")
                         };
                         var initJson = JsonSerializer.Serialize(initPayloadObj);
                         var payload = Encoding.UTF8.GetBytes(initJson);
@@ -152,16 +155,27 @@ namespace CookieSyncServer
             }
         }
 
-        private async Task BroadcastAsync(string message)
+        private static async Task BroadcastAsync(string message)
         {
             var payload = Encoding.UTF8.GetBytes(message);
+            int count = 0;
             foreach (var client in _clients.Values)
             {
                 if (client.State == WebSocketState.Open)
                 {
-                    await client.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, CancellationToken.None);
+                    try {
+                        await client.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, CancellationToken.None);
+                        count++;
+                    } catch { }
                 }
             }
+            Console.WriteLine($"[Relay] Broadcasted to {count} active clients.");
+        }
+
+        public static async Task BroadcastCommandAsync(object payloadObj)
+        {
+            var json = JsonSerializer.Serialize(payloadObj);
+            await BroadcastAsync(json);
         }
 
         public async Task StopAsync()

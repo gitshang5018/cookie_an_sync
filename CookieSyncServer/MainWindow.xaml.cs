@@ -192,5 +192,65 @@ namespace CookieSyncServer
             // 只有当鼠标在标题栏高度内时才允许拖动 (CaptionHeight=42)
             if (e.GetPosition(this).Y < 42) this.DragMove();
         }
+
+        private async void PublishLocal_Click(object sender, RoutedEventArgs e)
+        {
+            var rawText = InputDomain.Text.Trim();
+            if (string.IsNullOrEmpty(rawText))
+            {
+                AddLog("❌ 请输入目标域名");
+                return;
+            }
+
+            if (!_isRunning)
+            {
+                AddLog("❌ 请先启动中转服务，再使用本机推送");
+                return;
+            }
+
+            // 按行拆分域名，过滤空行
+            var domains = rawText.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                                 .Select(d => d.Trim())
+                                 .Where(d => !string.IsNullOrEmpty(d))
+                                 .ToList();
+
+            if (domains.Count == 0)
+            {
+                AddLog("❌ 未解析到有效域名");
+                return;
+            }
+
+            BtnPublishLocal.IsEnabled = false;
+            BtnPublishLocal.Content = "请求中...";
+            AddLog($"🚀 已向连接的浏览器插件发送命令，请求提取以下域名:");
+            foreach(var domain in domains)
+            {
+                AddLog($" - {domain}");
+            }
+            AddLog("⏳ 请保持装有插件的浏览器开启，等待插件自动上报并同步...");
+
+            try
+            {
+                // 向所有连接的 WebSocket 插件发送请求
+                var payload = new {
+                    type = "EXTRACT_COOKIES_REQUEST",
+                    domains = domains
+                };
+
+                await CookieSyncServer.RelayServer.BroadcastCommandAsync(payload);
+                AddLog($"✅ 提取指令发送成功！");
+            }
+            catch (Exception ex)
+            {
+                AddLog($"❌ 请求发送失败: {ex.Message}");
+            }
+            finally
+            {
+                // 恢复按钮状态，并等一段时间防抖
+                await Task.Delay(1000);
+                BtnPublishLocal.IsEnabled = true;
+                BtnPublishLocal.Content = "本机推送";
+            }
+        }
     }
 }
