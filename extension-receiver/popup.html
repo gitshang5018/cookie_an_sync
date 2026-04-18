@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Cookie Sync (Receiver)</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1 class="title">Sync Receiver</h1>
+            <span id="status-badge" class="badge disconnected">未连接</span>
+        </header>
+
+        <main>
+            <div class="status-card">
+                <div class="status-item">
+                    <span class="label-mini">最后同步时间</span>
+                    <span id="last-sync-time">从未</span>
+                </div>
+            </div>
+
+            <div class="input-group">
+                <label>中转站地址</label>
+                <input type="text" id="server-url" placeholder="192.168.x.x:3000">
+            </div>
+            
+            <button id="btn-listen" class="main-btn">开始监听更新</button>
+        </main>
+
+        <footer>
+            <p id="message-area" class="message"></p>
+        </footer>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>

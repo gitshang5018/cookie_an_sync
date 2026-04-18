@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "LAN Cookie Sync",
+  "version": "1.0.0",
+  "description": "局域网 Cookie 同步工具，支持单账号多电脑共享会话。",
+  "permissions": [
+    "cookies",
+    "storage",
+    "tabs",
+    "notifications",
+    "alarms"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "background.js"
+  }
+}

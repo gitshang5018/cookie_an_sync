@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cookie Sync</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="app-container">
+        <header>
+            <h1>LAN Cookie Sync</h1>
+            <div id="status-badge" class="badge disconnected">未连接</div>
+        </header>
+
+        <div class="role-switcher">
+            <button id="btn-provider" class="role-btn active">发送端</button>
+            <button id="btn-consumer" class="role-btn">接收端</button>
+        </div>
+
+        <main>
+            <section class="config-group">
+                <label for="server-url">中转站地址</label>
+                <input type="text" id="server-url" placeholder="例如: 192.168.1.5:3000">
+            </section>
+
+            <section class="config-group">
+                <label for="target-domain">目标域名 (支持多个，逗号分隔)</label>
+                <input type="text" id="target-domain" placeholder="例如: 699pic.com, nipic.com">
+            </section>
+
+            <div id="provider-panel" class="action-panel">
+                <p class="description">提取当前浏览器的 Cookie 并推送到局域网。</p>
+                <button id="btn-sync-now" class="main-btn primary">立即推送同步</button>
+            </div>
+
+            <div id="consumer-panel" class="action-panel hidden">
+                <p class="description">持续监听局域网更新，自动应用最新的 Cookie。</p>
+                <div class="status-info">
+                    <span class="label">上次同步:</span>
+                    <span id="last-sync-time">从未</span>
+                </div>
+                <button id="btn-listen" class="main-btn">开始监听</button>
+            </div>
+        </main>
+
+        <footer>
+            <p id="message-area" class="message"></p>
+        </footer>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,32 @@
+# .gitignore for ZTCookie Sync System
+
+# --- C# (.NET) ---
+bin/
+obj/
+*.user
+*.userosscache
+*.sln.docstates
+.vs/
+*.exe
+*.dll
+*.pdb
+
+# --- Single File Publish Artifacts ---
+CookieSyncServer/bin/Release/net10.0-windows/win-x64/publish/
+
+# --- Local Cache ---
+sync_cache.json
+
+# --- Browser Extensions ---
+node_modules/
+.DS_Store
+Thumbs.db
+*.log
+
+# --- Python (Legacy/Server) ---
+__pycache__/
+*.py[cod]
+*$py.class
+dist/
+build/
+*.spec

@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Cookie Sync (Sender)</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1 class="title">Sync Pusher</h1>
+        </header>
+
+        <main>
+            <div class="panel">
+                <p class="hint">提取浏览器 Cookie 并推送到局域网中转站进行分布式同步。</p>
+            </div>
+
+            <div class="input-group">
+                <label>中转站地址</label>
+                <input type="text" id="server-url" placeholder="192.168.x.x:3000">
+            </div>
+
+            <div class="input-group">
+                <label>目标域名 (逗号分隔)</label>
+                <input type="text" id="target-domain" placeholder="example.com, site.cn">
+            </div>
+            
+            <button id="btn-sync-now" class="main-btn">立即推送同步</button>
+        </main>
+
+        <footer>
+            <p id="message-area" class="message"></p>
+        </footer>
+    </div>
+    <script src="popup.js"></script>
+</body>
+</html>
