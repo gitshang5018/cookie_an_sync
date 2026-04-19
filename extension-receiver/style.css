@@ -15,7 +15,10 @@
 
 body {
     font-family: 'Inter', -apple-system, sans-serif;
-    background: #0f172a; /* 使用更柔和的深蓝背景 */
+    background: #0f172a;
+    background-image: 
+        radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.35) 0px, transparent 60%),
+        radial-gradient(at 100% 100%, rgba(52, 211, 153, 0.25) 0px, transparent 60%);
     color: var(--text);
     width: 320px;
     height: auto;
@@ -26,10 +29,11 @@ body {
 
 .container {
     width: 100%;
-    background: linear-gradient(145deg, rgba(15, 23, 42, 0.9), rgba(30, 41, 59, 0.8));
+    background: linear-gradient(145deg, rgba(15, 23, 42, 0.4), rgba(30, 41, 59, 0.2));
     backdrop-filter: blur(20px);
-    border: none; /* 去掉边框 */
-    border-radius: 0; /* 满铺不留圆角 */
+    -webkit-backdrop-filter: blur(20px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 0;
     padding: 24px;
     min-height: 400px;
 }

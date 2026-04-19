@@ -2,7 +2,7 @@
 
 [![Status](https://img.shields.io/badge/Status-Active-brightgreen.svg)]()
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Edge%20%7C%20Chrome-blue.svg)]()
-[![UI](https://img.shields.io/badge/Design-Glassmorphism-purple.svg)]()
+[![UI](https://img.shields.io/badge/Design-Modern_Dark-blue.svg)]()
 
 **LAN Cookie Sync** 是一款专为解决素材站、会员网站“单账号限制登录设备数量”而设计的局域网同步工具。它通过 WebSocket 技术实现 Cookie 的秒级实时推送，让您的多个设备如同共用一个浏览器会话。
 
@@ -10,7 +10,7 @@
 
 ## ✨ 核心特性
 
--   **💎 现代美学**：发送端与接收端插件均采用极致的 **Glassmorphism (毛玻璃)** 视觉设计，交互体验流畅。
+-   **🛠️ 工业深色风**：发送端与接收端插件均采用硬朗的 **Modern Dark** 视觉设计，交互直观，运行稳定。
 -   **⚡ 实时同步**：基于 WebSocket 协议，实现跨设备 Cookie 秒级同步，无需手动刷新（接收端自动重载）。
 -   **🛠️ 强大中转**：采用 C# WPF 开发的高性能中转服务器，支持本地持久化缓存，确保同步稳定。
 -   **🔒 隐私安全**：全过程数据流转仅在局域网内完成，不经过第三方服务器，确保账号信息安全。
