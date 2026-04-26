@@ -3,10 +3,11 @@
   "name": "Cookie Sync (Sender)",
   "version": "2.0.0",
   "description": "局域网 Cookie 同步工具 - 推送端",
-  "permissions": [
-    "cookies",
-    "storage"
-  ],
+"permissions": [
+  "cookies",
+  "storage",
+  "alarms"
+],
   "host_permissions": [
     "<all_urls>"
   ],

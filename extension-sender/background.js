@@ -3,15 +3,20 @@ let currentUrl = '';
 let isConnected = false;
 let isScanning = false;
 
-// 1. 初始化启动
-chrome.storage.local.get(['serverUrl'], (data) => {
-    if (data.serverUrl) {
-        currentUrl = data.serverUrl;
-        connectWebSocket(currentUrl);
-    } else {
-        startSilentDiscovery();
-    }
-});
+// 1. 初始化启动 - 立即尝试连接，不等待
+async function init() {
+  // 立即尝试连接之前保存的服务器
+  const data = await new Promise(resolve => chrome.storage.local.get(['serverUrl'], resolve));
+  if (data.serverUrl) {
+    currentUrl = data.serverUrl;
+    connectWebSocket(currentUrl);
+  } else {
+    startSilentDiscovery();
+  }
+  // 创建周期性 alarm 以保持 Service Worker 活跃（使用较短周期）
+  chrome.alarms.create('keep-alive', { periodInMinutes: 0.5, delayInMinutes: 0.1 });
+}
+init();
 
 // 2. 消息监听
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -25,6 +30,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         connectWebSocket(currentUrl);
         sendResponse({ success: true });
         return true;
+    }
+});
+
+// 2.5 Alarm 监听器 - 用于唤醒休眠的 Service Worker
+chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'keep-alive') {
+        if (!isConnected && !isScanning) {
+            if (currentUrl) {
+                connectWebSocket(currentUrl);
+            } else {
+                startSilentDiscovery();
+            }
+        }
     }
 });
 
