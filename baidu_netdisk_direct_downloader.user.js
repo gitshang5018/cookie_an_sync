@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         百度网盘免客户端直链下载 & IDM助手
 // @namespace    https://github.com/gitshang5018/cookie_an_sync
-// @version      1.0.0
+// @version      1.1.0
 // @description  免客户端直接在网页端提取百度网盘（个人网盘与分享页）真实直链，深度支持一键唤起 IDM、导出带 UA 的 IDM .ef2 配置文件、IDMan 命令行、Aria2/Motrix RPC 推送以及网页直接多线程流式下载。
 // @author       Antigravity
 // @match        https://pan.baidu.com/disk/main*
@@ -27,7 +27,7 @@
 // @connect      baidupcs.com
 // @connect      localhost
 // @connect      127.0.0.1
-// @run-at       document-idle
+// @run-at       document-start
 // @license      MIT
 // ==/UserScript==
 
@@ -35,7 +35,87 @@
     'use strict';
 
     // ==========================================
-    // 1. 常量与默认配置
+    // 1. 全局网络监听与文件缓存池 (XHR & Fetch Hook)
+    // ==========================================
+    const BaiduCache = {
+        filesMap: new Map(), // fs_id -> fileObj
+        nameMap: new Map(),  // filename -> fileObj
+        lastList: [],
+        yunData: null,
+
+        addFiles(fileList) {
+            if (!Array.isArray(fileList)) return;
+            fileList.forEach(item => {
+                const fs_id = String(item.fs_id || item.fsid || '');
+                const filename = item.server_filename || item.filename || '';
+                const fileObj = {
+                    fs_id: fs_id,
+                    filename: filename,
+                    size: Number(item.size || 0),
+                    isdir: Number(item.isdir || 0),
+                    path: item.path || '',
+                    dlink: item.dlink || ''
+                };
+                if (fs_id) this.filesMap.set(fs_id, fileObj);
+                if (filename) this.nameMap.set(filename, fileObj);
+            });
+            this.lastList = fileList;
+        }
+    };
+
+    // 拦截页面 XHR / Fetch 请求以静默获取所有文件数据
+    (function hookNetwork() {
+        const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+
+        // Hook XHR
+        const origOpen = win.XMLHttpRequest.prototype.open;
+        const origSend = win.XMLHttpRequest.prototype.send;
+
+        win.XMLHttpRequest.prototype.open = function (method, url) {
+            this._bduUrl = url;
+            return origOpen.apply(this, arguments);
+        };
+
+        win.XMLHttpRequest.prototype.send = function () {
+            this.addEventListener('load', function () {
+                try {
+                    const url = this._bduUrl || '';
+                    if (url.includes('/api/list') || url.includes('/xpan/file') || url.includes('/share/list')) {
+                        const res = JSON.parse(this.responseText);
+                        const list = res.list || (res.data && res.data.list) || res.info;
+                        if (Array.isArray(list)) {
+                            BaiduCache.addFiles(list);
+                        }
+                    }
+                } catch (e) {}
+            });
+            return origSend.apply(this, arguments);
+        };
+
+        // Hook Fetch
+        if (typeof win.fetch === 'function') {
+            const origFetch = win.fetch;
+            win.fetch = async function (input, init) {
+                const response = await origFetch.apply(this, arguments);
+                try {
+                    const url = typeof input === 'string' ? input : (input ? input.url : '');
+                    if (url.includes('/api/list') || url.includes('/xpan/file') || url.includes('/share/list')) {
+                        const clone = response.clone();
+                        clone.json().then(res => {
+                            const list = res.list || (res.data && res.data.list) || res.info;
+                            if (Array.isArray(list)) {
+                                BaiduCache.addFiles(list);
+                            }
+                        }).catch(() => {});
+                    }
+                } catch (e) {}
+                return response;
+            };
+        }
+    })();
+
+    // ==========================================
+    // 2. 常量与默认配置
     // ==========================================
     const DEFAULT_CONFIG = {
         rpcUrl: 'http://localhost:6800/jsonrpc',
@@ -56,33 +136,33 @@
     };
 
     // ==========================================
-    // 2. 注入现代化 UI 样式
+    // 3. 注入现代化 UI 样式
     // ==========================================
     GM_addStyle(`
         /* 触发按钮样式 */
         .bdu-btn-main {
-            display: inline-flex;
+            display: inline-flex !important;
             align-items: center;
             justify-content: center;
             gap: 6px;
-            background: linear-gradient(135deg, #0984e3, #00cec9);
+            background: linear-gradient(135deg, #0984e3, #00cec9) !important;
             color: #ffffff !important;
-            font-size: 13px;
-            font-weight: 600;
-            padding: 6px 14px;
-            border-radius: 20px;
-            border: none;
-            cursor: pointer;
-            box-shadow: 0 4px 12px rgba(9, 132, 227, 0.35);
-            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
-            margin-left: 8px;
+            font-size: 13px !important;
+            font-weight: 600 !important;
+            padding: 6px 14px !important;
+            border-radius: 20px !important;
+            border: none !important;
+            cursor: pointer !important;
+            box-shadow: 0 4px 12px rgba(9, 132, 227, 0.35) !important;
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1) !important;
+            margin-left: 8px !important;
             vertical-align: middle;
-            z-index: 999;
+            z-index: 9999;
             text-decoration: none !important;
         }
         .bdu-btn-main:hover {
             transform: translateY(-1.5px);
-            box-shadow: 0 6px 18px rgba(9, 132, 227, 0.5);
+            box-shadow: 0 6px 18px rgba(9, 132, 227, 0.5) !important;
             opacity: 0.95;
         }
         .bdu-btn-main:active {
@@ -93,7 +173,7 @@
         .bdu-modal-overlay {
             position: fixed;
             inset: 0;
-            background: rgba(15, 23, 42, 0.7);
+            background: rgba(15, 23, 42, 0.75);
             backdrop-filter: blur(8px);
             -webkit-backdrop-filter: blur(8px);
             z-index: 999999;
@@ -222,7 +302,7 @@
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
-            max-width: 420px;
+            max-width: 440px;
         }
         .bdu-file-meta {
             font-size: 12px;
@@ -278,7 +358,7 @@
         .bdu-action-btn.gray:hover { background: #334155; }
         .bdu-action-btn:active { transform: scale(0.97); }
 
-        /* 输入控件 */
+        /* 表单控件 */
         .bdu-form-group {
             display: flex;
             flex-direction: column;
@@ -304,7 +384,7 @@
             border-color: #38bdf8;
         }
 
-        /* 状态与进度条 */
+        /* 进度条 */
         .bdu-progress-wrapper {
             margin-top: 12px;
             background: #334155;
@@ -320,7 +400,7 @@
             transition: width 0.2s ease;
         }
 
-        /* Toast 提示浮窗 */
+        /* Toast 浮窗 */
         .bdu-toast {
             position: fixed;
             top: 24px;
@@ -349,7 +429,7 @@
     `);
 
     // ==========================================
-    // 3. 通用辅助工具函数
+    // 4. 通用辅助工具函数
     // ==========================================
     const Utils = {
         toast(msg, type = 'info', duration = 3000) {
@@ -369,7 +449,7 @@
         },
 
         formatBytes(bytes, decimals = 2) {
-            if (bytes === 0) return '0 B';
+            if (!bytes || bytes === 0) return '0 B';
             const k = 1024;
             const dm = decimals < 0 ? 0 : decimals;
             const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
@@ -411,76 +491,186 @@
     };
 
     // ==========================================
-    // 4. 百度网盘页面状态与直链解析引擎
+    // 5. 百度网盘页面状态与多层级选中提取引擎
     // ==========================================
     const BaiduEngine = {
-        // 判断当前页面模式：'disk' | 'share' | 'unknown'
         getPageType() {
             const path = location.pathname;
-            if (path.includes('/disk/')) return 'disk';
             if (path.includes('/s/') || path.includes('/share/')) return 'share';
             return 'disk';
         },
 
-        // 获取当前选中或可用的文件列表
+        // 从 Vue 节点读取绑定数据
+        getVueData(el) {
+            if (!el) return null;
+            try {
+                // Vue 2
+                if (el.__vue__) {
+                    const v = el.__vue__;
+                    return v.item || v.fileInfo || v.data || v.row || (v.$props && (v.$props.data || v.$props.item)) || null;
+                }
+                // Vue 3
+                if (el.__vueParentComponent) {
+                    const comp = el.__vueParentComponent;
+                    const props = comp.props || {};
+                    const ctx = comp.ctx || {};
+                    return props.item || props.row || props.data || ctx.item || ctx.row || ctx.data || null;
+                }
+            } catch (e) {}
+            return null;
+        },
+
+        // 全面提取当前选中的文件列表
         getSelectedFiles() {
             const pageType = this.getPageType();
             const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-            const files = [];
+            const results = [];
+            const seenFsIds = new Set();
 
-            if (pageType === 'disk') {
-                // 1. 从官方全局 locals 获取
-                if (win.locals && typeof win.locals.get === 'function') {
-                    const selectList = win.locals.get('file_list') || win.locals.get('selected_list');
-                    if (Array.isArray(selectList) && selectList.length > 0) {
-                        return selectList.map(item => ({
-                            fs_id: item.fs_id,
-                            filename: item.server_filename,
-                            size: item.size,
-                            isdir: item.isdir,
-                            path: item.path
-                        }));
+            const addValidFile = (item) => {
+                if (!item) return;
+                const fs_id = String(item.fs_id || item.fsid || '');
+                const filename = item.server_filename || item.filename || '';
+                const key = fs_id || filename;
+                if (!key || seenFsIds.has(key)) return;
+                seenFsIds.add(key);
+
+                // 尝试从缓存中补充完整元数据
+                let fullInfo = BaiduCache.filesMap.get(fs_id) || BaiduCache.nameMap.get(filename) || {};
+                results.push({
+                    fs_id: fs_id || fullInfo.fs_id || '',
+                    filename: filename || fullInfo.filename || '未知文件',
+                    size: Number(item.size || fullInfo.size || 0),
+                    isdir: Number(item.isdir !== undefined ? item.isdir : (fullInfo.isdir || 0)),
+                    path: item.path || fullInfo.path || ''
+                });
+            };
+
+            // 策略 1：检查百度网盘内部 AMD 模块 (require context)
+            if (typeof win.require === 'function') {
+                try {
+                    const sys = win.require('system-core:context/context.js')?.instanceForSystem;
+                    if (sys?.list && typeof sys.list.getSelected === 'function') {
+                        const list = sys.list.getSelected();
+                        if (Array.isArray(list) && list.length > 0) {
+                            list.forEach(addValidFile);
+                            if (results.length > 0) return results;
+                        }
                     }
+                } catch (e) {}
+                try {
+                    const baseService = win.require('base:widget/tools/service/system.js')?.get('list');
+                    if (baseService && typeof baseService.getSelected === 'function') {
+                        const list = baseService.getSelected();
+                        if (Array.isArray(list) && list.length > 0) {
+                            list.forEach(addValidFile);
+                            if (results.length > 0) return results;
+                        }
+                    }
+                } catch (e) {}
+            }
+
+            // 策略 2：检查全局 locals 对象
+            if (win.locals && typeof win.locals.get === 'function') {
+                try {
+                    const selectList = win.locals.get('selected_list') || win.locals.get('file_list');
+                    if (Array.isArray(selectList) && selectList.length > 0) {
+                        selectList.forEach(addValidFile);
+                        if (results.length > 0) return results;
+                    }
+                } catch (e) {}
+            }
+
+            // 策略 3：检查 DOM 中的复选框与勾选行 (支持所有视图模式与版本)
+            // 查找带有选中状态的行容器或复选框
+            const checkedElements = document.querySelectorAll(`
+                .wp-s-pan-table__body-row.is-checked,
+                .wp-s-pan-table__body-row.is-selected,
+                .wp-s-pan-table__body-row.selected,
+                .wp-s-pan-list__item.is-checked,
+                .nd-main-list-item.is-checked,
+                .mouse-choose-item.is-checked,
+                .u-checkbox.is-checked,
+                .el-checkbox.is-checked,
+                .wp-s-pan-table__checkbox.is-checked,
+                [class*="pan-table__body-row"][class*="checked"],
+                [class*="pan-table__body-row"][class*="selected"],
+                [class*="list-item"][class*="is-checked"],
+                [class*="grid-item"][class*="is-checked"],
+                [aria-checked="true"],
+                input[type="checkbox"]:checked
+            `);
+
+            checkedElements.forEach(el => {
+                // 如果是 checkbox 元素，向上追溯到行元素
+                const row = el.closest(`
+                    .wp-s-pan-table__body-row,
+                    .wp-s-pan-list__item,
+                    .nd-main-list-item,
+                    .mouse-choose-item,
+                    [class*="pan-table__body-row"],
+                    [class*="list-item"],
+                    [class*="table__row"],
+                    [class*="grid-item"],
+                    tr,
+                    dd
+                `) || el;
+
+                // 从 Vue 实例中提取数据
+                let vueItem = BaiduEngine.getVueData(row) || BaiduEngine.getVueData(el);
+                if (vueItem) {
+                    addValidFile(vueItem);
+                    return;
                 }
-                // 2. 从 Vue / React 根节点查找选中的 DOM 元素
-                const checkedRows = document.querySelectorAll('.wp-s-pan-table__body-row.is-checked, .nd-main-list .is-checked, .open-enable-selection .is-selected');
-                if (checkedRows.length > 0) {
-                    checkedRows.forEach(row => {
-                        const nameEl = row.querySelector('.wp-s-pan-table__body-row-text, .filename, .text');
-                        const name = nameEl ? nameEl.getAttribute('title') || nameEl.innerText.trim() : '文件';
-                        // 寻找对应的数据 key
-                        files.push({
-                            fs_id: row.getAttribute('data-id') || '',
-                            filename: name,
-                            size: 0,
-                            isdir: 0
-                        });
+
+                // 从 DOM 属性中提取 data-id / fs_id
+                const dataId = row.getAttribute('data-id') || row.dataset.id || row.dataset.fsid || '';
+                const titleEl = row.querySelector('.wp-s-pan-table__body-row-text, [class*="filename"], [class*="name"], a[title], span[title]');
+                const filename = (titleEl && (titleEl.getAttribute('title') || titleEl.innerText.trim())) || '';
+
+                if (dataId || filename) {
+                    addValidFile({
+                        fs_id: dataId,
+                        server_filename: filename
                     });
                 }
-            } else if (pageType === 'share') {
-                // 分享页面从 yunData 或 locals 获取
-                const shareData = win.yunData && win.yunData.FILEINFO;
+            });
+
+            if (results.length > 0) return results;
+
+            // 策略 4：分享页面如果单文件且未明确勾选，自动提取当前展示文件
+            if (pageType === 'share') {
+                const shareData = win.yunData?.FILEINFO || win.yunData?.SHAREPAGEDATA?.file_list;
                 if (Array.isArray(shareData) && shareData.length > 0) {
-                    return shareData.map(item => ({
-                        fs_id: item.fs_id,
-                        filename: item.server_filename,
-                        size: item.size,
-                        isdir: item.isdir,
-                        path: item.path
-                    }));
+                    shareData.forEach(addValidFile);
+                    if (results.length > 0) return results;
                 }
             }
 
-            return files;
+            return results;
         },
 
         // 获取个人网盘 Direct Link (dlink)
         async fetchDiskDlink(files) {
             const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-            const bdstoken = (win.yunData && win.yunData.MYBDSTOKEN) || Utils.getCookie('STOKEN');
+            const fsids = files.map(f => f.fs_id).filter(Boolean);
+
+            // 优先通过现代 xpan multimedia API 获取 (最稳定)
+            if (fsids.length > 0) {
+                try {
+                    const xpanRes = await BaiduEngine.fetchXpanFileMetas(fsids);
+                    if (xpanRes && xpanRes.length > 0) {
+                        return xpanRes;
+                    }
+                } catch (e) {
+                    console.warn('[直链助手] xpan 获取直链降级:', e);
+                }
+            }
+
+            // 备用：调用 /api/download 获取
+            const bdstoken = (win.yunData && win.yunData.MYBDSTOKEN) || Utils.getCookie('STOKEN') || '';
             const sign = (win.yunData && win.yunData.SIGN) || '';
             const timestamp = (win.yunData && win.yunData.TIMESTAMP) || Math.floor(Date.now() / 1000);
-            const fsids = files.map(f => f.fs_id).filter(Boolean);
 
             const apiUrl = `https://pan.baidu.com/api/download?type=dlink&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}&fidlist=${encodeURIComponent(JSON.stringify(fsids))}&bdstoken=${encodeURIComponent(bdstoken)}&channel=chunlei&web=1&app_id=250528&clienttype=0`;
 
@@ -498,23 +688,20 @@
                             if (data.errno === 0 && data.dlink) {
                                 resolve(data.dlink);
                             } else {
-                                // 尝试通过 xpan multimedia filemetas 接口获取备用 dlink
-                                BaiduEngine.fetchXpanFileMetas(fsids).then(resolve).catch(() => {
-                                    reject(new Error(data.errmsg || '获取直链失败，错误码：' + data.errno));
-                                });
+                                reject(new Error(data.errmsg || '获取直链失败，错误码：' + data.errno));
                             }
                         } catch (e) {
                             reject(new Error('直链响应解析失败: ' + e.message));
                         }
                     },
-                    onerror(err) {
+                    onerror() {
                         reject(new Error('网络请求异常'));
                     }
                 });
             });
         },
 
-        // 备用：通过 xpan multimedia API 获取
+        // 通过 xpan multimedia API 获取
         async fetchXpanFileMetas(fsids) {
             const url = `https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1&fsids=${encodeURIComponent(JSON.stringify(fsids))}`;
             return new Promise((resolve, reject) => {
@@ -588,7 +775,7 @@
                             reject(new Error('分享直链解析异常: ' + e.message));
                         }
                     },
-                    onerror(err) {
+                    onerror() {
                         reject(new Error('分享请求网络错误'));
                     }
                 });
@@ -597,10 +784,9 @@
     };
 
     // ==========================================
-    // 5. IDM 专有调用与导出子系统
+    // 6. IDM 专有调用与导出子系统
     // ==========================================
     const IDMSubsystem = {
-        // 生成并导出 IDM .ef2 批量任务导入文件
         exportEf2(fileItems) {
             const ua = Config.get('clientUa');
             const cookie = document.cookie;
@@ -628,7 +814,6 @@
             Utils.toast('已成功导出 .ef2 文件！请在 IDM 中选择【任务 -> 导入 -> 从 ef2 文件导入】', 'success', 5000);
         },
 
-        // 复制 IDMan.exe 命令行调用
         copyCliCommand(fileItem) {
             const idmPath = Config.get('idmPath');
             const saveDir = Config.get('rpcDir');
@@ -640,7 +825,6 @@
             Utils.copyText(cmd, '已复制 IDM 命令行！在 CMD/PowerShell 运行即可唤起 IDM');
         },
 
-        // 生成 .cmd / .bat 一键启动文件
         exportBatchScript(fileItems) {
             const idmPath = Config.get('idmPath');
             const saveDir = Config.get('rpcDir');
@@ -659,7 +843,6 @@
             Utils.toast('已生成 .cmd 批处理文件，双击即可直接调用 IDM 下载！', 'success', 4000);
         },
 
-        // 一键复制 IDM 专用 UA 配置
         copyUA() {
             const ua = Config.get('clientUa');
             Utils.copyText(ua, '已复制专用 User-Agent！请在 IDM【选项 -> 下载 -> 手动添加任务 -> 用户代理】中粘贴');
@@ -667,10 +850,9 @@
     };
 
     // ==========================================
-    // 6. Aria2 / Motrix RPC 推送与网页直下
+    // 7. Aria2 / Motrix RPC 推送与网页直下
     // ==========================================
     const Downloader = {
-        // 推送到 Aria2 / Motrix
         async pushToAria2(fileItems) {
             const rpcUrl = Config.get('rpcUrl');
             const rpcSecret = Config.get('rpcSecret');
@@ -737,7 +919,6 @@
             }
         },
 
-        // 网页直接流式模拟下载
         directWebDownload(fileItem, onProgress) {
             const ua = Config.get('clientUa');
             const filename = fileItem.filename || 'download.bin';
@@ -756,7 +937,7 @@
                     onload() {
                         Utils.toast(`文件【${filename}】下载完成！`, 'success');
                     },
-                    onerror(err) {
+                    onerror() {
                         Utils.toast('GM_download 出错，转为流拉取方式', 'warning');
                         Downloader.fallbackStreamDownload(fileItem, onProgress);
                     },
@@ -772,7 +953,6 @@
             }
         },
 
-        // 备用 Blob 流式下载
         fallbackStreamDownload(fileItem, onProgress) {
             const ua = Config.get('clientUa');
             const filename = fileItem.filename || 'download.bin';
@@ -808,7 +988,7 @@
     };
 
     // ==========================================
-    // 7. UI 控制面板与交互管理
+    // 8. UI 控制面板与交互管理
     // ==========================================
     const UIManager = {
         activeTab: 'idm',
@@ -1040,22 +1220,22 @@
     };
 
     // ==========================================
-    // 8. 触发解析与直链拉取主流程
+    // 9. 触发解析与直链拉取主流程
     // ==========================================
     async function triggerDirectDownload() {
         const selected = BaiduEngine.getSelectedFiles();
         if (!selected || selected.length === 0) {
-            Utils.toast('请先在页面上勾选要下载的文件！', 'warning');
+            Utils.toast('未能检测到选中的文件，请在列表勾选文件后重试！', 'warning', 3500);
             return;
         }
 
         const isDir = selected.some(item => item.isdir === 1);
         if (isDir) {
-            Utils.toast('暂不支持直接下载文件夹，请进入文件夹勾选具体文件！', 'warning');
+            Utils.toast('暂不支持直接下载文件夹，请进入文件夹勾选具体文件！', 'warning', 3500);
             return;
         }
 
-        Utils.toast('正在模拟客户端解析高速直链...', 'info', 2000);
+        Utils.toast(`已选中 ${selected.length} 个文件，正在模拟客户端解析直链...`, 'info', 2000);
 
         try {
             const pageType = BaiduEngine.getPageType();
@@ -1082,15 +1262,30 @@
     }
 
     // ==========================================
-    // 9. DOM 动态挂载与按钮注入
+    // 10. DOM 动态挂载与按钮注入
     // ==========================================
     function injectActionButtons() {
         if (document.getElementById('bdu-main-btn')) return;
 
         // 个人网盘导航栏定位
-        const diskToolbar = document.querySelector('.wp-s-pan-table__header-actions, .nd-main-list-actions, .tbar, .button-group');
+        const diskToolbar = document.querySelector(`
+            .wp-s-pan-table__header-actions,
+            .nd-main-list-actions,
+            .tbar,
+            .button-group,
+            .wp-s-pan-table__header-left,
+            .wp-s-pan-file-list__header-left,
+            .wp-s-pan-file-list__header-actions,
+            .wp-s-header-user-btn
+        `);
         // 分享页定位
-        const shareToolbar = document.querySelector('.slide-show-right, .module-share-header, .share-file-viewer-header, .KPDwCE');
+        const shareToolbar = document.querySelector(`
+            .slide-show-right,
+            .module-share-header,
+            .share-file-viewer-header,
+            .KPDwCE,
+            .g-button-group
+        `);
 
         const targetToolbar = diskToolbar || shareToolbar;
 
@@ -1107,7 +1302,7 @@
 
         if (targetToolbar) {
             targetToolbar.appendChild(mainBtn);
-        } else {
+        } else if (document.body) {
             // 如果未找到固定工具栏，以悬浮按钮形式挂载在页面右上角
             mainBtn.style.position = 'fixed';
             mainBtn.style.top = '75px';
@@ -1117,7 +1312,7 @@
     }
 
     // ==========================================
-    // 10. 初始化与生命周期监控
+    // 11. 初始化与生命周期监控
     // ==========================================
     function init() {
         UIManager.init();
@@ -1137,7 +1332,9 @@
         const observer = new MutationObserver(() => {
             injectActionButtons();
         });
-        observer.observe(document.body, { childList: true, subtree: true });
+        if (document.body) {
+            observer.observe(document.body, { childList: true, subtree: true });
+        }
     }
 
     if (document.readyState === 'loading') {
