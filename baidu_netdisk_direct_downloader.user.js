@@ -1,0 +1,1148 @@
+// ==UserScript==
+// @name         百度网盘免客户端直链下载 & IDM助手
+// @namespace    https://github.com/gitshang5018/cookie_an_sync
+// @version      1.0.0
+// @description  免客户端直接在网页端提取百度网盘（个人网盘与分享页）真实直链，深度支持一键唤起 IDM、导出带 UA 的 IDM .ef2 配置文件、IDMan 命令行、Aria2/Motrix RPC 推送以及网页直接多线程流式下载。
+// @author       Antigravity
+// @match        https://pan.baidu.com/disk/main*
+// @match        https://pan.baidu.com/disk/home*
+// @match        https://pan.baidu.com/s/*
+// @match        https://pan.baidu.com/share/link*
+// @match        https://pan.baidu.com/share/init*
+// @match        https://yun.baidu.com/disk/main*
+// @match        https://yun.baidu.com/disk/home*
+// @match        https://yun.baidu.com/s/*
+// @match        https://yun.baidu.com/share/link*
+// @grant        GM_xmlhttpRequest
+// @grant        GM_download
+// @grant        GM_setClipboard
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_addStyle
+// @grant        GM_registerMenuCommand
+// @grant        unsafeWindow
+// @connect      pan.baidu.com
+// @connect      baidu.com
+// @connect      pcs.baidu.com
+// @connect      baidupcs.com
+// @connect      localhost
+// @connect      127.0.0.1
+// @run-at       document-idle
+// @license      MIT
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    // ==========================================
+    // 1. 常量与默认配置
+    // ==========================================
+    const DEFAULT_CONFIG = {
+        rpcUrl: 'http://localhost:6800/jsonrpc',
+        rpcSecret: '',
+        rpcDir: '',
+        idmPath: 'C:\\Program Files (x86)\\Internet Download Manager\\IDMan.exe',
+        clientUa: 'netdisk;11.24.3;PC;PC-Windows;10.0.19045;WindowsBaiduYunGuanJia',
+        autoCloseModal: false
+    };
+
+    const Config = {
+        get(key) {
+            return GM_getValue(key, DEFAULT_CONFIG[key]);
+        },
+        set(key, val) {
+            GM_setValue(key, val);
+        }
+    };
+
+    // ==========================================
+    // 2. 注入现代化 UI 样式
+    // ==========================================
+    GM_addStyle(`
+        /* 触发按钮样式 */
+        .bdu-btn-main {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            background: linear-gradient(135deg, #0984e3, #00cec9);
+            color: #ffffff !important;
+            font-size: 13px;
+            font-weight: 600;
+            padding: 6px 14px;
+            border-radius: 20px;
+            border: none;
+            cursor: pointer;
+            box-shadow: 0 4px 12px rgba(9, 132, 227, 0.35);
+            transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+            margin-left: 8px;
+            vertical-align: middle;
+            z-index: 999;
+            text-decoration: none !important;
+        }
+        .bdu-btn-main:hover {
+            transform: translateY(-1.5px);
+            box-shadow: 0 6px 18px rgba(9, 132, 227, 0.5);
+            opacity: 0.95;
+        }
+        .bdu-btn-main:active {
+            transform: scale(0.96);
+        }
+
+        /* 模态弹窗遮罩 */
+        .bdu-modal-overlay {
+            position: fixed;
+            inset: 0;
+            background: rgba(15, 23, 42, 0.7);
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            z-index: 999999;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s ease;
+        }
+        .bdu-modal-overlay.active {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        /* 弹窗主体卡片 */
+        .bdu-modal {
+            background: #1e293b;
+            color: #f8fafc;
+            width: 90vw;
+            max-width: 680px;
+            border-radius: 16px;
+            box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(255, 255, 255, 0.1);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            transform: scale(0.92) translateY(15px);
+            transition: all 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        .bdu-modal-overlay.active .bdu-modal {
+            transform: scale(1) translateY(0);
+        }
+
+        /* 弹窗头部 */
+        .bdu-modal-header {
+            padding: 16px 20px;
+            background: #0f172a;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .bdu-modal-title {
+            font-size: 16px;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #38bdf8;
+        }
+        .bdu-modal-close {
+            background: transparent;
+            border: none;
+            color: #94a3b8;
+            font-size: 20px;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: 6px;
+            transition: all 0.2s;
+            line-height: 1;
+        }
+        .bdu-modal-close:hover {
+            color: #fff;
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        /* 选项卡导航 */
+        .bdu-tabs {
+            display: flex;
+            background: #0f172a;
+            padding: 0 16px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            gap: 8px;
+        }
+        .bdu-tab-item {
+            padding: 12px 16px;
+            font-size: 13px;
+            font-weight: 600;
+            color: #94a3b8;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s ease;
+        }
+        .bdu-tab-item:hover {
+            color: #f1f5f9;
+        }
+        .bdu-tab-item.active {
+            color: #38bdf8;
+            border-bottom-color: #38bdf8;
+        }
+
+        /* 弹窗内容区域 */
+        .bdu-modal-body {
+            padding: 20px;
+            max-height: 70vh;
+            overflow-y: auto;
+        }
+
+        /* 文件列表展示卡片 */
+        .bdu-file-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-bottom: 16px;
+        }
+        .bdu-file-card {
+            background: #334155;
+            padding: 12px 14px;
+            border-radius: 8px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            border: 1px solid rgba(255, 255, 255, 0.05);
+        }
+        .bdu-file-info {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+            overflow: hidden;
+        }
+        .bdu-file-name {
+            font-size: 13px;
+            font-weight: 600;
+            color: #f8fafc;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 420px;
+        }
+        .bdu-file-meta {
+            font-size: 12px;
+            color: #94a3b8;
+            display: flex;
+            gap: 12px;
+        }
+
+        /* 功能卡片区与按钮组 */
+        .bdu-section-box {
+            background: #0f172a;
+            border-radius: 10px;
+            padding: 16px;
+            margin-bottom: 14px;
+            border: 1px solid rgba(255, 255, 255, 0.06);
+        }
+        .bdu-section-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: #cbd5e1;
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .bdu-btn-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+            gap: 10px;
+        }
+        .bdu-action-btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            padding: 10px 14px;
+            border-radius: 8px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s ease;
+            text-decoration: none !important;
+            color: #fff;
+        }
+        .bdu-action-btn.idm { background: #2563eb; }
+        .bdu-action-btn.idm:hover { background: #1d4ed8; }
+        .bdu-action-btn.green { background: #059669; }
+        .bdu-action-btn.green:hover { background: #047857; }
+        .bdu-action-btn.purple { background: #7c3aed; }
+        .bdu-action-btn.purple:hover { background: #6d28d9; }
+        .bdu-action-btn.gray { background: #475569; }
+        .bdu-action-btn.gray:hover { background: #334155; }
+        .bdu-action-btn:active { transform: scale(0.97); }
+
+        /* 输入控件 */
+        .bdu-form-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            margin-bottom: 12px;
+        }
+        .bdu-form-group label {
+            font-size: 12px;
+            font-weight: 600;
+            color: #94a3b8;
+        }
+        .bdu-input {
+            background: #1e293b;
+            border: 1px solid #475569;
+            color: #f8fafc;
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        .bdu-input:focus {
+            border-color: #38bdf8;
+        }
+
+        /* 状态与进度条 */
+        .bdu-progress-wrapper {
+            margin-top: 12px;
+            background: #334155;
+            border-radius: 100px;
+            height: 8px;
+            overflow: hidden;
+            display: none;
+        }
+        .bdu-progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #38bdf8, #818cf8);
+            transition: width 0.2s ease;
+        }
+
+        /* Toast 提示浮窗 */
+        .bdu-toast {
+            position: fixed;
+            top: 24px;
+            right: 24px;
+            background: #1e293b;
+            color: #f8fafc;
+            padding: 12px 18px;
+            border-radius: 8px;
+            box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.5);
+            font-size: 13px;
+            font-weight: 600;
+            z-index: 1000000;
+            border-left: 4px solid #38bdf8;
+            opacity: 0;
+            transform: translateY(-20px);
+            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+            pointer-events: none;
+        }
+        .bdu-toast.show {
+            opacity: 1;
+            transform: translateY(0);
+        }
+        .bdu-toast.success { border-left-color: #10b981; }
+        .bdu-toast.error { border-left-color: #ef4444; }
+        .bdu-toast.warning { border-left-color: #f59e0b; }
+    `);
+
+    // ==========================================
+    // 3. 通用辅助工具函数
+    // ==========================================
+    const Utils = {
+        toast(msg, type = 'info', duration = 3000) {
+            let toastEl = document.getElementById('bdu-toast-el');
+            if (!toastEl) {
+                toastEl = document.createElement('div');
+                toastEl.id = 'bdu-toast-el';
+                toastEl.className = 'bdu-toast';
+                document.body.appendChild(toastEl);
+            }
+            toastEl.className = `bdu-toast ${type} show`;
+            toastEl.innerText = msg;
+            clearTimeout(this._toastTimer);
+            this._toastTimer = setTimeout(() => {
+                toastEl.className = 'bdu-toast';
+            }, duration);
+        },
+
+        formatBytes(bytes, decimals = 2) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const dm = decimals < 0 ? 0 : decimals;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+        },
+
+        downloadBlob(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = filename;
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => {
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }, 1000);
+        },
+
+        downloadText(text, filename) {
+            const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+            this.downloadBlob(blob, filename);
+        },
+
+        copyText(text, tip = '已成功复制到剪贴板！') {
+            if (typeof GM_setClipboard === 'function') {
+                GM_setClipboard(text);
+            } else {
+                navigator.clipboard.writeText(text);
+            }
+            Utils.toast(tip, 'success');
+        },
+
+        getCookie(name) {
+            const match = document.cookie.match(new RegExp('(^| )' + name + '=([^;]+)'));
+            return match ? match[2] : '';
+        }
+    };
+
+    // ==========================================
+    // 4. 百度网盘页面状态与直链解析引擎
+    // ==========================================
+    const BaiduEngine = {
+        // 判断当前页面模式：'disk' | 'share' | 'unknown'
+        getPageType() {
+            const path = location.pathname;
+            if (path.includes('/disk/')) return 'disk';
+            if (path.includes('/s/') || path.includes('/share/')) return 'share';
+            return 'disk';
+        },
+
+        // 获取当前选中或可用的文件列表
+        getSelectedFiles() {
+            const pageType = this.getPageType();
+            const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            const files = [];
+
+            if (pageType === 'disk') {
+                // 1. 从官方全局 locals 获取
+                if (win.locals && typeof win.locals.get === 'function') {
+                    const selectList = win.locals.get('file_list') || win.locals.get('selected_list');
+                    if (Array.isArray(selectList) && selectList.length > 0) {
+                        return selectList.map(item => ({
+                            fs_id: item.fs_id,
+                            filename: item.server_filename,
+                            size: item.size,
+                            isdir: item.isdir,
+                            path: item.path
+                        }));
+                    }
+                }
+                // 2. 从 Vue / React 根节点查找选中的 DOM 元素
+                const checkedRows = document.querySelectorAll('.wp-s-pan-table__body-row.is-checked, .nd-main-list .is-checked, .open-enable-selection .is-selected');
+                if (checkedRows.length > 0) {
+                    checkedRows.forEach(row => {
+                        const nameEl = row.querySelector('.wp-s-pan-table__body-row-text, .filename, .text');
+                        const name = nameEl ? nameEl.getAttribute('title') || nameEl.innerText.trim() : '文件';
+                        // 寻找对应的数据 key
+                        files.push({
+                            fs_id: row.getAttribute('data-id') || '',
+                            filename: name,
+                            size: 0,
+                            isdir: 0
+                        });
+                    });
+                }
+            } else if (pageType === 'share') {
+                // 分享页面从 yunData 或 locals 获取
+                const shareData = win.yunData && win.yunData.FILEINFO;
+                if (Array.isArray(shareData) && shareData.length > 0) {
+                    return shareData.map(item => ({
+                        fs_id: item.fs_id,
+                        filename: item.server_filename,
+                        size: item.size,
+                        isdir: item.isdir,
+                        path: item.path
+                    }));
+                }
+            }
+
+            return files;
+        },
+
+        // 获取个人网盘 Direct Link (dlink)
+        async fetchDiskDlink(files) {
+            const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            const bdstoken = (win.yunData && win.yunData.MYBDSTOKEN) || Utils.getCookie('STOKEN');
+            const sign = (win.yunData && win.yunData.SIGN) || '';
+            const timestamp = (win.yunData && win.yunData.TIMESTAMP) || Math.floor(Date.now() / 1000);
+            const fsids = files.map(f => f.fs_id).filter(Boolean);
+
+            const apiUrl = `https://pan.baidu.com/api/download?type=dlink&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}&fidlist=${encodeURIComponent(JSON.stringify(fsids))}&bdstoken=${encodeURIComponent(bdstoken)}&channel=chunlei&web=1&app_id=250528&clienttype=0`;
+
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: apiUrl,
+                    headers: {
+                        'User-Agent': Config.get('clientUa'),
+                        'Referer': 'https://pan.baidu.com/disk/main'
+                    },
+                    onload(res) {
+                        try {
+                            const data = JSON.parse(res.responseText);
+                            if (data.errno === 0 && data.dlink) {
+                                resolve(data.dlink);
+                            } else {
+                                // 尝试通过 xpan multimedia filemetas 接口获取备用 dlink
+                                BaiduEngine.fetchXpanFileMetas(fsids).then(resolve).catch(() => {
+                                    reject(new Error(data.errmsg || '获取直链失败，错误码：' + data.errno));
+                                });
+                            }
+                        } catch (e) {
+                            reject(new Error('直链响应解析失败: ' + e.message));
+                        }
+                    },
+                    onerror(err) {
+                        reject(new Error('网络请求异常'));
+                    }
+                });
+            });
+        },
+
+        // 备用：通过 xpan multimedia API 获取
+        async fetchXpanFileMetas(fsids) {
+            const url = `https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1&fsids=${encodeURIComponent(JSON.stringify(fsids))}`;
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'GET',
+                    url: url,
+                    headers: {
+                        'User-Agent': Config.get('clientUa'),
+                        'Referer': 'https://pan.baidu.com/disk/main'
+                    },
+                    onload(res) {
+                        try {
+                            const data = JSON.parse(res.responseText);
+                            if (data.errno === 0 && data.info && data.info.length > 0) {
+                                resolve(data.info.map(item => ({
+                                    fs_id: item.fs_id,
+                                    dlink: item.dlink,
+                                    filename: item.server_filename,
+                                    size: item.size
+                                })));
+                            } else {
+                                reject(new Error('xpan filemetas 获取直链失败: ' + data.errno));
+                            }
+                        } catch (e) {
+                            reject(e);
+                        }
+                    },
+                    onerror: reject
+                });
+            });
+        },
+
+        // 获取分享页面 Direct Link
+        async fetchShareDlink(files) {
+            const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            const yunData = win.yunData || {};
+            const uk = yunData.SHARE_UK || (yunData.SHAREPAGEDATA && yunData.SHAREPAGEDATA.share_uk) || '';
+            const shareid = yunData.SHARE_ID || (yunData.SHAREPAGEDATA && yunData.SHAREPAGEDATA.shareid) || '';
+            const sign = yunData.SIGN || '';
+            const timestamp = yunData.TIMESTAMP || Math.floor(Date.now() / 1000);
+            const bdstoken = yunData.MYBDSTOKEN || '';
+            const fsids = files.map(f => f.fs_id).filter(Boolean);
+
+            const postUrl = `https://pan.baidu.com/api/sharedownload?sign=${sign}&timestamp=${timestamp}&bdstoken=${bdstoken}&channel=chunlei&web=1&app_id=250528&clienttype=0`;
+            const postData = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=${encodeURIComponent(JSON.stringify(fsids))}&extra=`;
+
+            return new Promise((resolve, reject) => {
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: postUrl,
+                    data: postData,
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'User-Agent': Config.get('clientUa'),
+                        'Referer': location.href
+                    },
+                    onload(res) {
+                        try {
+                            const data = JSON.parse(res.responseText);
+                            if (data.errno === 0 && data.list) {
+                                resolve(data.list.map(item => ({
+                                    fs_id: item.fs_id,
+                                    dlink: item.dlink,
+                                    filename: item.server_filename,
+                                    size: item.size
+                                })));
+                            } else {
+                                reject(new Error(data.errmsg || '分享链接解析失败，错误码：' + data.errno));
+                            }
+                        } catch (e) {
+                            reject(new Error('分享直链解析异常: ' + e.message));
+                        }
+                    },
+                    onerror(err) {
+                        reject(new Error('分享请求网络错误'));
+                    }
+                });
+            });
+        }
+    };
+
+    // ==========================================
+    // 5. IDM 专有调用与导出子系统
+    // ==========================================
+    const IDMSubsystem = {
+        // 生成并导出 IDM .ef2 批量任务导入文件
+        exportEf2(fileItems) {
+            const ua = Config.get('clientUa');
+            const cookie = document.cookie;
+            const referer = location.href;
+
+            let ef2Text = '';
+            for (const f of fileItems) {
+                if (!f.dlink) continue;
+                ef2Text += '<\r\n';
+                ef2Text += `${f.dlink}\r\n`;
+                ef2Text += `User-Agent: ${ua}\r\n`;
+                ef2Text += `Referer: ${referer}\r\n`;
+                if (cookie) ef2Text += `Cookie: ${cookie}\r\n`;
+                if (f.filename) ef2Text += `file: ${f.filename}\r\n`;
+                ef2Text += '>\r\n';
+            }
+
+            if (!ef2Text) {
+                Utils.toast('没有解析到有效的下载链接', 'warning');
+                return;
+            }
+
+            const exportName = `[BaiduIDM]_${fileItems[0]?.filename || 'tasks'}.ef2`;
+            Utils.downloadText(ef2Text, exportName);
+            Utils.toast('已成功导出 .ef2 文件！请在 IDM 中选择【任务 -> 导入 -> 从 ef2 文件导入】', 'success', 5000);
+        },
+
+        // 复制 IDMan.exe 命令行调用
+        copyCliCommand(fileItem) {
+            const idmPath = Config.get('idmPath');
+            const saveDir = Config.get('rpcDir');
+            let cmd = `"${idmPath}" /d "${fileItem.dlink}"`;
+            if (fileItem.filename) cmd += ` /f "${fileItem.filename}"`;
+            if (saveDir) cmd += ` /p "${saveDir}"`;
+            cmd += ' /a /n';
+
+            Utils.copyText(cmd, '已复制 IDM 命令行！在 CMD/PowerShell 运行即可唤起 IDM');
+        },
+
+        // 生成 .cmd / .bat 一键启动文件
+        exportBatchScript(fileItems) {
+            const idmPath = Config.get('idmPath');
+            const saveDir = Config.get('rpcDir');
+            let batContent = '@echo off\r\nchcp 65001 >nul\r\necho 正在唤起 IDM 下载百度网盘直链任务...\r\n\r\n';
+
+            for (const f of fileItems) {
+                if (!f.dlink) continue;
+                batContent += `"${idmPath}" /d "${f.dlink}"`;
+                if (f.filename) batContent += ` /f "${f.filename}"`;
+                if (saveDir) batContent += ` /p "${saveDir}"`;
+                batContent += ' /a /n\r\n';
+            }
+
+            batContent += '\r\necho 全部任务已推送到 IDM！\r\npause\r\n';
+            Utils.downloadText(batContent, `[IDM一键启动]_${fileItems[0]?.filename || 'download'}.cmd`);
+            Utils.toast('已生成 .cmd 批处理文件，双击即可直接调用 IDM 下载！', 'success', 4000);
+        },
+
+        // 一键复制 IDM 专用 UA 配置
+        copyUA() {
+            const ua = Config.get('clientUa');
+            Utils.copyText(ua, '已复制专用 User-Agent！请在 IDM【选项 -> 下载 -> 手动添加任务 -> 用户代理】中粘贴');
+        }
+    };
+
+    // ==========================================
+    // 6. Aria2 / Motrix RPC 推送与网页直下
+    // ==========================================
+    const Downloader = {
+        // 推送到 Aria2 / Motrix
+        async pushToAria2(fileItems) {
+            const rpcUrl = Config.get('rpcUrl');
+            const rpcSecret = Config.get('rpcSecret');
+            const rpcDir = Config.get('rpcDir');
+            const ua = Config.get('clientUa');
+            const cookie = document.cookie;
+            const referer = location.href;
+
+            let successCount = 0;
+            for (const f of fileItems) {
+                if (!f.dlink) continue;
+
+                const headerList = [
+                    `User-Agent: ${ua}`,
+                    `Referer: ${referer}`
+                ];
+                if (cookie) headerList.push(`Cookie: ${cookie}`);
+
+                const options = {
+                    header: headerList
+                };
+                if (f.filename) options.out = f.filename;
+                if (rpcDir) options.dir = rpcDir;
+
+                const params = [];
+                if (rpcSecret) params.push(`token:${rpcSecret}`);
+                params.push([f.dlink]);
+                params.push(options);
+
+                const payload = {
+                    jsonrpc: '2.0',
+                    id: 'BaiduDirect_' + Date.now(),
+                    method: 'aria2.addUri',
+                    params: params
+                };
+
+                try {
+                    await new Promise((resolve, reject) => {
+                        GM_xmlhttpRequest({
+                            method: 'POST',
+                            url: rpcUrl,
+                            data: JSON.stringify(payload),
+                            headers: { 'Content-Type': 'application/json' },
+                            onload(res) {
+                                if (res.status >= 200 && res.status < 300) {
+                                    successCount++;
+                                    resolve();
+                                } else {
+                                    reject(new Error(`RPC 返回错误码: ${res.status}`));
+                                }
+                            },
+                            onerror: reject
+                        });
+                    });
+                } catch (e) {
+                    console.error('RPC 推送失败:', e);
+                }
+            }
+
+            if (successCount > 0) {
+                Utils.toast(`成功推送 ${successCount} 个任务至 Aria2/Motrix！`, 'success');
+            } else {
+                Utils.toast('推送到 Aria2/Motrix 失败，请检查 RPC 地址与 Token 设置', 'error');
+            }
+        },
+
+        // 网页直接流式模拟下载
+        directWebDownload(fileItem, onProgress) {
+            const ua = Config.get('clientUa');
+            const filename = fileItem.filename || 'download.bin';
+
+            Utils.toast('开始网页直接下载，请稍候...', 'info');
+
+            if (typeof GM_download === 'function') {
+                GM_download({
+                    url: fileItem.dlink,
+                    name: filename,
+                    headers: {
+                        'User-Agent': ua,
+                        'Referer': 'https://pan.baidu.com/disk/main',
+                        'Cookie': document.cookie
+                    },
+                    onload() {
+                        Utils.toast(`文件【${filename}】下载完成！`, 'success');
+                    },
+                    onerror(err) {
+                        Utils.toast('GM_download 出错，转为流拉取方式', 'warning');
+                        Downloader.fallbackStreamDownload(fileItem, onProgress);
+                    },
+                    onprogress(res) {
+                        if (res.total > 0 && onProgress) {
+                            const percent = (res.loaded / res.total) * 100;
+                            onProgress(percent);
+                        }
+                    }
+                });
+            } else {
+                Downloader.fallbackStreamDownload(fileItem, onProgress);
+            }
+        },
+
+        // 备用 Blob 流式下载
+        fallbackStreamDownload(fileItem, onProgress) {
+            const ua = Config.get('clientUa');
+            const filename = fileItem.filename || 'download.bin';
+
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: fileItem.dlink,
+                responseType: 'blob',
+                headers: {
+                    'User-Agent': ua,
+                    'Referer': 'https://pan.baidu.com/disk/main',
+                    'Cookie': document.cookie
+                },
+                onprogress(res) {
+                    if (res.total > 0 && onProgress) {
+                        const percent = (res.loaded / res.total) * 100;
+                        onProgress(percent);
+                    }
+                },
+                onload(res) {
+                    if (res.status === 200) {
+                        Utils.downloadBlob(res.response, filename);
+                        Utils.toast(`【${filename}】下载完成！`, 'success');
+                    } else {
+                        Utils.toast(`下载失败，HTTP 状态码：${res.status}`, 'error');
+                    }
+                },
+                onerror() {
+                    Utils.toast('网页下载网络中断', 'error');
+                }
+            });
+        }
+    };
+
+    // ==========================================
+    // 7. UI 控制面板与交互管理
+    // ==========================================
+    const UIManager = {
+        activeTab: 'idm',
+        currentParsedFiles: [],
+
+        init() {
+            this.createModal();
+            this.bindGlobalEvents();
+        },
+
+        createModal() {
+            if (document.getElementById('bdu-main-modal')) return;
+
+            const overlay = document.createElement('div');
+            overlay.id = 'bdu-main-modal';
+            overlay.className = 'bdu-modal-overlay';
+
+            overlay.innerHTML = `
+                <div class="bdu-modal">
+                    <div class="bdu-modal-header">
+                        <div class="bdu-modal-title">
+                            <span>⚡</span> 百度网盘免客户端直链 & IDM 下载中心
+                        </div>
+                        <button class="bdu-modal-close" id="bdu-modal-close-btn">&times;</button>
+                    </div>
+
+                    <div class="bdu-tabs">
+                        <div class="bdu-tab-item active" data-tab="idm">🚀 IDM 专区</div>
+                        <div class="bdu-tab-item" data-tab="direct">🌐 网页直接下载</div>
+                        <div class="bdu-tab-item" data-tab="rpc">📡 Aria2 / Motrix</div>
+                        <div class="bdu-tab-item" data-tab="link">🔗 直链与 cURL</div>
+                        <div class="bdu-tab-item" data-tab="settings">⚙️ 偏好设置</div>
+                    </div>
+
+                    <div class="bdu-modal-body">
+                        <div class="bdu-file-list" id="bdu-file-list-container">
+                            <!-- 动态加载解析到的文件卡片 -->
+                        </div>
+
+                        <!-- 进度条 -->
+                        <div class="bdu-progress-wrapper" id="bdu-progress-wrapper">
+                            <div class="bdu-progress-bar" id="bdu-progress-bar"></div>
+                        </div>
+
+                        <!-- IDM 专区内容 -->
+                        <div class="bdu-tab-content" id="bdu-tab-idm">
+                            <div class="bdu-section-box">
+                                <div class="bdu-section-title">⚡ IDM 核心调用操作</div>
+                                <div class="bdu-btn-grid">
+                                    <button class="bdu-action-btn idm" id="bdu-btn-ef2">📁 导出 IDM .ef2 任务</button>
+                                    <button class="bdu-action-btn purple" id="bdu-btn-idm-bat">📄 生成 .cmd 一键调用</button>
+                                    <button class="bdu-action-btn gray" id="bdu-btn-idm-cli">📋 复制 IDM 命令行</button>
+                                    <button class="bdu-action-btn gray" id="bdu-btn-idm-ua">⚙️ 复制 IDM 专用 UA</button>
+                                </div>
+                            </div>
+                            <div style="font-size:12px; color:#94a3b8; line-height:1.6; padding:0 4px;">
+                                💡 <b>IDM 使用小贴士：</b><br>
+                                1. <b>推荐方式：</b>点击【导出 IDM .ef2 任务】，然后在 IDM 中点击 <code>任务 -> 导入 -> 从 ef2 文件导入</code> 即可满速下载。<br>
+                                2. <b>命令行唤起：</b>点击【生成 .cmd】保存后双击，或【复制 IDM 命令行】在终端执行，即可直接唤起 IDM。
+                            </div>
+                        </div>
+
+                        <!-- 网页直接下载 -->
+                        <div class="bdu-tab-content" id="bdu-tab-direct" style="display:none;">
+                            <div class="bdu-section-box">
+                                <div class="bdu-section-title">🌐 网页端模拟客户端直下</div>
+                                <p style="font-size:12px; color:#94a3b8; margin-bottom:12px;">直接在当前网页后台模拟客户端拉取文件，免装百度网盘桌面端。</p>
+                                <button class="bdu-action-btn green" id="bdu-btn-web-dl" style="width:100%;">🚀 立即在网页内直接下载</button>
+                            </div>
+                        </div>
+
+                        <!-- Aria2 / Motrix 推送 -->
+                        <div class="bdu-tab-content" id="bdu-tab-rpc" style="display:none;">
+                            <div class="bdu-section-box">
+                                <div class="bdu-section-title">📡 一键推送到本地/局域网 RPC 服务</div>
+                                <p style="font-size:12px; color:#94a3b8; margin-bottom:12px;">自动附加专属 User-Agent 与会话 Cookies，支持多线程分块加速。</p>
+                                <button class="bdu-action-btn purple" id="bdu-btn-rpc-push" style="width:100%;">📡 立即推送到 Aria2 / Motrix</button>
+                            </div>
+                        </div>
+
+                        <!-- 直链与 cURL -->
+                        <div class="bdu-tab-content" id="bdu-tab-link" style="display:none;">
+                            <div class="bdu-section-box">
+                                <div class="bdu-section-title">🔗 原始高速直链与命令行</div>
+                                <div class="bdu-btn-grid">
+                                    <button class="bdu-action-btn gray" id="bdu-btn-copy-dlink">📋 复制高速直链</button>
+                                    <button class="bdu-action-btn gray" id="bdu-btn-copy-curl">💻 复制 cURL 命令</button>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- 设置面板 -->
+                        <div class="bdu-tab-content" id="bdu-tab-settings" style="display:none;">
+                            <div class="bdu-section-box">
+                                <div class="bdu-section-title">⚙️ 脚本配置中心</div>
+                                <div class="bdu-form-group">
+                                    <label>Aria2 / Motrix RPC 地址：</label>
+                                    <input type="text" class="bdu-input" id="bdu-cfg-rpc-url" value="${Config.get('rpcUrl')}">
+                                </div>
+                                <div class="bdu-form-group">
+                                    <label>RPC 密钥 Token（可选）：</label>
+                                    <input type="text" class="bdu-input" id="bdu-cfg-rpc-secret" value="${Config.get('rpcSecret')}">
+                                </div>
+                                <div class="bdu-form-group">
+                                    <label>IDMan.exe 绝对路径（Windows）：</label>
+                                    <input type="text" class="bdu-input" id="bdu-cfg-idm-path" value="${Config.get('idmPath')}">
+                                </div>
+                                <div class="bdu-form-group">
+                                    <label>客户端模拟 User-Agent：</label>
+                                    <input type="text" class="bdu-input" id="bdu-cfg-ua" value="${Config.get('clientUa')}">
+                                </div>
+                                <button class="bdu-action-btn green" id="bdu-btn-save-cfg" style="margin-top:8px;">💾 保存所有配置</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            `;
+
+            document.body.appendChild(overlay);
+        },
+
+        bindGlobalEvents() {
+            const overlay = document.getElementById('bdu-main-modal');
+            const closeBtn = document.getElementById('bdu-modal-close-btn');
+
+            closeBtn.addEventListener('click', () => this.hide());
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) this.hide();
+            });
+
+            // 切换选项卡
+            const tabs = overlay.querySelectorAll('.bdu-tab-item');
+            tabs.forEach(tab => {
+                tab.addEventListener('click', () => {
+                    tabs.forEach(t => t.classList.remove('active'));
+                    tab.classList.add('active');
+                    const tabKey = tab.getAttribute('data-tab');
+
+                    ['idm', 'direct', 'rpc', 'link', 'settings'].forEach(k => {
+                        const contentEl = document.getElementById(`bdu-tab-${k}`);
+                        if (contentEl) {
+                            contentEl.style.display = (k === tabKey) ? 'block' : 'none';
+                        }
+                    });
+                });
+            });
+
+            // 绑定各功能按钮
+            document.getElementById('bdu-btn-ef2').addEventListener('click', () => {
+                IDMSubsystem.exportEf2(this.currentParsedFiles);
+            });
+            document.getElementById('bdu-btn-idm-bat').addEventListener('click', () => {
+                IDMSubsystem.exportBatchScript(this.currentParsedFiles);
+            });
+            document.getElementById('bdu-btn-idm-cli').addEventListener('click', () => {
+                if (this.currentParsedFiles.length > 0) {
+                    IDMSubsystem.copyCliCommand(this.currentParsedFiles[0]);
+                }
+            });
+            document.getElementById('bdu-btn-idm-ua').addEventListener('click', () => {
+                IDMSubsystem.copyUA();
+            });
+            document.getElementById('bdu-btn-web-dl').addEventListener('click', () => {
+                if (this.currentParsedFiles.length > 0) {
+                    const progressBar = document.getElementById('bdu-progress-bar');
+                    const progressWrapper = document.getElementById('bdu-progress-wrapper');
+                    progressWrapper.style.display = 'block';
+                    Downloader.directWebDownload(this.currentParsedFiles[0], (percent) => {
+                        progressBar.style.width = percent.toFixed(1) + '%';
+                    });
+                }
+            });
+            document.getElementById('bdu-btn-rpc-push').addEventListener('click', () => {
+                Downloader.pushToAria2(this.currentParsedFiles);
+            });
+            document.getElementById('bdu-btn-copy-dlink').addEventListener('click', () => {
+                if (this.currentParsedFiles.length > 0 && this.currentParsedFiles[0].dlink) {
+                    Utils.copyText(this.currentParsedFiles[0].dlink, '高速直链已复制到剪贴板！');
+                }
+            });
+            document.getElementById('bdu-btn-copy-curl').addEventListener('click', () => {
+                if (this.currentParsedFiles.length > 0) {
+                    const f = this.currentParsedFiles[0];
+                    const ua = Config.get('clientUa');
+                    const cookie = document.cookie;
+                    let curlCmd = `curl -L "${f.dlink}" -A "${ua}"`;
+                    if (cookie) curlCmd += ` -H "Cookie: ${cookie}"`;
+                    if (f.filename) curlCmd += ` -o "${f.filename}"`;
+                    Utils.copyText(curlCmd, 'cURL 命令已复制！');
+                }
+            });
+            document.getElementById('bdu-btn-save-cfg').addEventListener('click', () => {
+                Config.set('rpcUrl', document.getElementById('bdu-cfg-rpc-url').value.trim());
+                Config.set('rpcSecret', document.getElementById('bdu-cfg-rpc-secret').value.trim());
+                Config.set('idmPath', document.getElementById('bdu-cfg-idm-path').value.trim());
+                Config.set('clientUa', document.getElementById('bdu-cfg-ua').value.trim());
+                Utils.toast('配置已成功保存！', 'success');
+            });
+        },
+
+        show(parsedFiles) {
+            this.currentParsedFiles = parsedFiles;
+            const container = document.getElementById('bdu-file-list-container');
+            container.innerHTML = '';
+
+            for (const f of parsedFiles) {
+                const card = document.createElement('div');
+                card.className = 'bdu-file-card';
+                card.innerHTML = `
+                    <div class="bdu-file-info">
+                        <div class="bdu-file-name" title="${f.filename}">${f.filename}</div>
+                        <div class="bdu-file-meta">
+                            <span>大小: ${Utils.formatBytes(f.size || 0)}</span>
+                            <span style="color:#38bdf8;">✓ 已提取直链</span>
+                        </div>
+                    </div>
+                `;
+                container.appendChild(card);
+            }
+
+            const overlay = document.getElementById('bdu-main-modal');
+            overlay.classList.add('active');
+        },
+
+        hide() {
+            const overlay = document.getElementById('bdu-main-modal');
+            if (overlay) overlay.classList.remove('active');
+        }
+    };
+
+    // ==========================================
+    // 8. 触发解析与直链拉取主流程
+    // ==========================================
+    async function triggerDirectDownload() {
+        const selected = BaiduEngine.getSelectedFiles();
+        if (!selected || selected.length === 0) {
+            Utils.toast('请先在页面上勾选要下载的文件！', 'warning');
+            return;
+        }
+
+        const isDir = selected.some(item => item.isdir === 1);
+        if (isDir) {
+            Utils.toast('暂不支持直接下载文件夹，请进入文件夹勾选具体文件！', 'warning');
+            return;
+        }
+
+        Utils.toast('正在模拟客户端解析高速直链...', 'info', 2000);
+
+        try {
+            const pageType = BaiduEngine.getPageType();
+            let parsedResults = [];
+
+            if (pageType === 'share') {
+                parsedResults = await BaiduEngine.fetchShareDlink(selected);
+            } else {
+                parsedResults = await BaiduEngine.fetchDiskDlink(selected);
+            }
+
+            // 合并文件名称与信息
+            const completeFiles = parsedResults.map((item, idx) => ({
+                filename: item.filename || selected[idx]?.filename || '未知文件',
+                size: item.size || selected[idx]?.size || 0,
+                dlink: item.dlink || item
+            }));
+
+            UIManager.show(completeFiles);
+        } catch (err) {
+            console.error('[直链助手] 解析异常:', err);
+            Utils.toast(err.message || '直链提取失败', 'error', 4000);
+        }
+    }
+
+    // ==========================================
+    // 9. DOM 动态挂载与按钮注入
+    // ==========================================
+    function injectActionButtons() {
+        if (document.getElementById('bdu-main-btn')) return;
+
+        // 个人网盘导航栏定位
+        const diskToolbar = document.querySelector('.wp-s-pan-table__header-actions, .nd-main-list-actions, .tbar, .button-group');
+        // 分享页定位
+        const shareToolbar = document.querySelector('.slide-show-right, .module-share-header, .share-file-viewer-header, .KPDwCE');
+
+        const targetToolbar = diskToolbar || shareToolbar;
+
+        const mainBtn = document.createElement('button');
+        mainBtn.id = 'bdu-main-btn';
+        mainBtn.className = 'bdu-btn-main';
+        mainBtn.innerHTML = `<span>⚡</span> 免客户端直链下载`;
+        mainBtn.title = '免客户端提取高速直链，支持 IDM / Aria2 / 网页直接下载';
+        mainBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            triggerDirectDownload();
+        });
+
+        if (targetToolbar) {
+            targetToolbar.appendChild(mainBtn);
+        } else {
+            // 如果未找到固定工具栏，以悬浮按钮形式挂载在页面右上角
+            mainBtn.style.position = 'fixed';
+            mainBtn.style.top = '75px';
+            mainBtn.style.right = '24px';
+            document.body.appendChild(mainBtn);
+        }
+    }
+
+    // ==========================================
+    // 10. 初始化与生命周期监控
+    // ==========================================
+    function init() {
+        UIManager.init();
+        injectActionButtons();
+
+        // 注册油猴菜单
+        if (typeof GM_registerMenuCommand === 'function') {
+            GM_registerMenuCommand('⚡ 免客户端直链下载 / IDM', triggerDirectDownload);
+            GM_registerMenuCommand('⚙️ 打开设置面板', () => {
+                UIManager.show([{ filename: '设置面板示例', size: 0, dlink: '' }]);
+                const settingsTab = document.querySelector('.bdu-tab-item[data-tab="settings"]');
+                if (settingsTab) settingsTab.click();
+            });
+        }
+
+        // 监听 DOM 变化以应对单页应用(SPA)路由切换
+        const observer = new MutationObserver(() => {
+            injectActionButtons();
+        });
+        observer.observe(document.body, { childList: true, subtree: true });
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', init);
+    } else {
+        init();
+    }
+})();
