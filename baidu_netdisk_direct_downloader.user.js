@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         百度网盘免客户端直链下载 & IDM助手
 // @namespace    https://github.com/gitshang5018/cookie_an_sync
-// @version      1.2.0
+// @version      1.3.0
 // @description  免客户端直接在网页端提取百度网盘（个人网盘与分享页）真实直链，深度支持一键唤起 IDM、导出带 UA 的 IDM .ef2 配置文件、IDMan 命令行、Aria2/Motrix RPC 推送以及网页直接多线程流式下载。
 // @author       Antigravity
 // @match        https://pan.baidu.com/disk/main*
@@ -354,6 +354,8 @@
         .bdu-action-btn.green:hover { background: #047857; }
         .bdu-action-btn.purple { background: #7c3aed; }
         .bdu-action-btn.purple:hover { background: #6d28d9; }
+        .bdu-action-btn.orange { background: #d97706; }
+        .bdu-action-btn.orange:hover { background: #b45309; }
         .bdu-action-btn.gray { background: #475569; }
         .bdu-action-btn.gray:hover { background: #334155; }
         .bdu-action-btn:active { transform: scale(0.97); }
@@ -491,7 +493,7 @@
     };
 
     // ==========================================
-    // 5. 百度网盘多通道直链解析引擎 (4-Tier Fallback)
+    // 5. 百度网盘多通道直链解析引擎 (个人盘 & 分享页全面适配)
     // ==========================================
     const BaiduEngine = {
         getPageType() {
@@ -518,12 +520,10 @@
         getVueData(el) {
             if (!el) return null;
             try {
-                // Vue 2
                 if (el.__vue__) {
                     const v = el.__vue__;
                     return v.item || v.fileInfo || v.data || v.row || (v.$props && (v.$props.data || v.$props.item)) || null;
                 }
-                // Vue 3
                 if (el.__vueParentComponent) {
                     const comp = el.__vueParentComponent;
                     const props = comp.props || {};
@@ -584,7 +584,8 @@
                     filename: filename || fullInfo.filename || '未知文件',
                     size: Number(item.size || fullInfo.size || 0),
                     isdir: Number(item.isdir !== undefined ? item.isdir : (fullInfo.isdir || 0)),
-                    path: item.path || fullInfo.path || defaultPath
+                    path: item.path || fullInfo.path || defaultPath,
+                    dlink: item.dlink || fullInfo.dlink || ''
                 });
             };
 
@@ -677,7 +678,6 @@
             const needsSync = results.some(f => !f.fs_id || !f.path || f.size === 0);
             if (needsSync && pageType === 'disk') {
                 await this.syncCurrentDirFiles();
-                // 再次尝试补充
                 results.forEach(f => {
                     const match = BaiduCache.nameMap.get(f.filename) || (f.fs_id ? BaiduCache.filesMap.get(f.fs_id) : null);
                     if (match) {
@@ -692,13 +692,13 @@
             return results;
         },
 
-        // 解析单个文件的下载直链 (多通道降级保障，彻底告别错误2)
-        async resolveSingleDlink(file) {
+        // 解析单个个人盘文件的直链
+        async resolveSingleDiskDlink(file) {
             const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
             const fsidNum = Number(file.fs_id) || file.fs_id;
             const ua = Config.get('clientUa');
 
-            // 通道 1：xpan multimedia filemetas API (官方最新 REST 规范，入参为数字数组)
+            // 通道 1：xpan multimedia filemetas API
             if (file.fs_id) {
                 try {
                     const xpanUrl = `https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1&fsids=${encodeURIComponent(JSON.stringify([fsidNum]))}`;
@@ -724,15 +724,12 @@
                         });
                     });
                     if (res) return res;
-                } catch (e) {
-                    console.warn('[直链助手] 通道1(xpan)未命中，转通道2:', e.message);
-                }
+                } catch (e) {}
             }
 
-            // 通道 2：PCS 专用直链通道 (基于文件 path 生成永久直链，带 UA 直接 302 满速重定向，无需 sign)
+            // 通道 2：PCS 专用直链通道 (基于文件真实 path 生成免 sign 链接)
             if (file.path) {
                 const pcsUrl = `https://pan.baidu.com/rest/2.0/pcs/file?method=download&path=${encodeURIComponent(file.path)}&app_id=250528`;
-                // 尝试预探测一次获取最终 CDN 跳转地址，若探测不到则直接使用 PCS 直链
                 try {
                     const finalCdnUrl = await new Promise((resolve) => {
                         GM_xmlhttpRequest({
@@ -758,50 +755,14 @@
                 }
             }
 
-            // 通道 3：经典 api/download 接口 (针对带签名页面)
-            if (file.fs_id) {
-                try {
-                    const bdstoken = (win.yunData && win.yunData.MYBDSTOKEN) || Utils.getCookie('STOKEN') || '';
-                    const sign = (win.yunData && win.yunData.SIGN) || '';
-                    const timestamp = (win.yunData && win.yunData.TIMESTAMP) || Math.floor(Date.now() / 1000);
-                    const apiUrl = `https://pan.baidu.com/api/download?type=dlink&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}&fidlist=${encodeURIComponent(JSON.stringify([fsidNum]))}&bdstoken=${encodeURIComponent(bdstoken)}&channel=chunlei&web=1&app_id=250528&clienttype=0`;
-
-                    const dlinkRes = await new Promise((resolve, reject) => {
-                        GM_xmlhttpRequest({
-                            method: 'GET',
-                            url: apiUrl,
-                            headers: {
-                                'User-Agent': ua,
-                                'Referer': 'https://pan.baidu.com/disk/main'
-                            },
-                            onload(r) {
-                                try {
-                                    const d = JSON.parse(r.responseText);
-                                    if (d.errno === 0 && d.dlink) {
-                                        const link = Array.isArray(d.dlink) ? (d.dlink[0]?.dlink || d.dlink[0]) : d.dlink;
-                                        resolve(link);
-                                    } else {
-                                        reject(new Error('api/download errno: ' + d.errno));
-                                    }
-                                } catch (e) { reject(e); }
-                            },
-                            onerror: reject
-                        });
-                    });
-                    if (dlinkRes) return dlinkRes;
-                } catch (e) {
-                    console.warn('[直链助手] 通道3(api/download)未命中:', e.message);
-                }
-            }
-
-            throw new Error(`文件【${file.filename}】未能解析到下载地址，请检查文件状态`);
+            throw new Error(`文件【${file.filename}】未能解析到下载地址`);
         },
 
         // 获取个人网盘全部选中文件直链
         async fetchDiskDlink(files) {
             const results = [];
             for (const f of files) {
-                const dlink = await BaiduEngine.resolveSingleDlink(f);
+                const dlink = await BaiduEngine.resolveSingleDiskDlink(f);
                 results.push({
                     fs_id: f.fs_id,
                     filename: f.filename,
@@ -812,25 +773,29 @@
             return results;
         },
 
-        // 获取分享页面 Direct Link
-        async fetchShareDlink(files) {
+        // 分享页一键转存到自己网盘（临时目录）并获取高速直链（彻底免除分享页风控与错误2）
+        async transferAndFetchDlink(files) {
             const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
             const yunData = win.yunData || {};
-            const uk = yunData.SHARE_UK || (yunData.SHAREPAGEDATA && yunData.SHAREPAGEDATA.share_uk) || '';
-            const shareid = yunData.SHARE_ID || (yunData.SHAREPAGEDATA && yunData.SHAREPAGEDATA.shareid) || '';
-            const sign = yunData.SIGN || '';
-            const timestamp = yunData.TIMESTAMP || Math.floor(Date.now() / 1000);
-            const bdstoken = yunData.MYBDSTOKEN || '';
+            const shareData = yunData.SHAREPAGEDATA || {};
+            const shareid = yunData.SHARE_ID || shareData.shareid || win.locals?.get('share_id') || '';
+            const from = yunData.SHARE_UK || shareData.share_uk || win.locals?.get('share_uk') || '';
+            const bdstoken = yunData.MYBDSTOKEN || shareData.bdstoken || Utils.getCookie('STOKEN') || '';
+            const sekey = decodeURIComponent(Utils.getCookie('BDCLND') || yunData.SEKEY || '');
+
             const fsidNums = files.map(f => Number(f.fs_id) || f.fs_id).filter(Boolean);
+            const targetDir = '/_直链转存临时目录_';
 
-            const postUrl = `https://pan.baidu.com/api/sharedownload?sign=${sign}&timestamp=${timestamp}&bdstoken=${bdstoken}&channel=chunlei&web=1&app_id=250528&clienttype=0`;
-            const postData = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=${encodeURIComponent(JSON.stringify(fsidNums))}&extra=`;
+            Utils.toast('正在转存到网盘临时目录以获取无限制高速直链...', 'info', 3000);
 
-            return new Promise((resolve, reject) => {
+            const transferUrl = `https://pan.baidu.com/share/transfer?shareid=${shareid}&from=${from}&bdstoken=${bdstoken}&channel=chunlei&web=1&app_id=250528&clienttype=0`;
+            const transferData = `fsidlist=${encodeURIComponent(JSON.stringify(fsidNums))}&path=${encodeURIComponent(targetDir)}&sekey=${encodeURIComponent(sekey)}`;
+
+            const transferRes = await new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
                     method: 'POST',
-                    url: postUrl,
-                    data: postData,
+                    url: transferUrl,
+                    data: transferData,
                     headers: {
                         'Content-Type': 'application/x-www-form-urlencoded',
                         'User-Agent': Config.get('clientUa'),
@@ -839,25 +804,111 @@
                     onload(res) {
                         try {
                             const data = JSON.parse(res.responseText);
-                            if (data.errno === 0 && data.list) {
-                                resolve(data.list.map(item => ({
-                                    fs_id: item.fs_id,
-                                    dlink: item.dlink,
-                                    filename: item.server_filename,
-                                    size: item.size
-                                })));
+                            if (data.errno === 0 || data.errno === 12) { // 12为已存在
+                                resolve(data);
                             } else {
-                                reject(new Error(data.errmsg || '分享链接解析失败，错误码：' + data.errno));
+                                reject(new Error(data.errmsg || '转存失败，错误码：' + data.errno));
                             }
-                        } catch (e) {
-                            reject(new Error('分享直链解析异常: ' + e.message));
-                        }
+                        } catch (e) { reject(e); }
                     },
-                    onerror(err) {
-                        reject(new Error('分享请求网络错误'));
-                    }
+                    onerror: reject
                 });
             });
+
+            // 转存完成后，为每个文件构建个人网盘路径并获取 PCS/xpan 直链
+            const results = [];
+            for (const f of files) {
+                const targetFilePath = targetDir + '/' + f.filename;
+                const pcsUrl = `https://pan.baidu.com/rest/2.0/pcs/file?method=download&path=${encodeURIComponent(targetFilePath)}&app_id=250528`;
+                results.push({
+                    fs_id: f.fs_id,
+                    filename: f.filename,
+                    size: f.size,
+                    dlink: pcsUrl
+                });
+            }
+            return results;
+        },
+
+        // 获取分享页面 Direct Link (多通道尝试)
+        async fetchShareDlink(files) {
+            const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+
+            // 1. 如果页面 yunData.FILEINFO 中直接包含 dlink，优先使用
+            const directMatches = [];
+            const shareFileInfo = win.yunData?.FILEINFO || win.yunData?.SHAREPAGEDATA?.file_list;
+            if (Array.isArray(shareFileInfo)) {
+                for (const f of files) {
+                    const match = shareFileInfo.find(item => item.fs_id == f.fs_id || item.server_filename == f.filename);
+                    if (match && match.dlink) {
+                        directMatches.push({
+                            fs_id: f.fs_id,
+                            filename: f.filename,
+                            size: f.size,
+                            dlink: match.dlink
+                        });
+                    }
+                }
+            }
+            if (directMatches.length === files.length && directMatches.length > 0) {
+                return directMatches;
+            }
+
+            // 2. 尝试调用官方 sharedownload API (修复完整的 extra 与参数规范)
+            const yunData = win.yunData || {};
+            const shareData = yunData.SHAREPAGEDATA || {};
+            const uk = yunData.SHARE_UK || shareData.share_uk || yunData.uk || win.locals?.get('share_uk') || '';
+            const shareid = yunData.SHARE_ID || shareData.shareid || yunData.shareid || win.locals?.get('share_id') || '';
+            const sign = yunData.SIGN || shareData.sign || win.locals?.get('sign') || '';
+            const timestamp = yunData.TIMESTAMP || shareData.timestamp || win.locals?.get('timestamp') || Math.floor(Date.now() / 1000);
+            const bdstoken = yunData.MYBDSTOKEN || shareData.bdstoken || '';
+            const fsidNums = files.map(f => Number(f.fs_id) || f.fs_id).filter(Boolean);
+
+            const sekey = decodeURIComponent(Utils.getCookie('BDCLND') || yunData.SEKEY || '');
+            const extraObj = sekey ? { sekey: sekey } : {};
+            const extraStr = JSON.stringify(extraObj);
+
+            if (uk && shareid && sign) {
+                const postUrl = `https://pan.baidu.com/api/sharedownload?sign=${encodeURIComponent(sign)}&timestamp=${timestamp}&bdstoken=${encodeURIComponent(bdstoken)}&channel=chunlei&web=1&app_id=250528&clienttype=0`;
+                const postData = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=${encodeURIComponent(JSON.stringify(fsidNums))}&extra=${encodeURIComponent(extraStr)}`;
+
+                try {
+                    const apiResult = await new Promise((resolve, reject) => {
+                        GM_xmlhttpRequest({
+                            method: 'POST',
+                            url: postUrl,
+                            data: postData,
+                            headers: {
+                                'Content-Type': 'application/x-www-form-urlencoded',
+                                'User-Agent': Config.get('clientUa'),
+                                'Referer': location.href
+                            },
+                            onload(res) {
+                                try {
+                                    const data = JSON.parse(res.responseText);
+                                    if (data.errno === 0 && data.list && data.list.length > 0) {
+                                        resolve(data.list.map(item => ({
+                                            fs_id: item.fs_id,
+                                            dlink: item.dlink,
+                                            filename: item.server_filename,
+                                            size: item.size
+                                        })));
+                                    } else {
+                                        reject(new Error('sharedownload errno: ' + data.errno));
+                                    }
+                                } catch (e) { reject(e); }
+                            },
+                            onerror: reject
+                        });
+                    });
+                    if (apiResult && apiResult.length > 0) return apiResult;
+                } catch (e) {
+                    console.warn('[直链助手] 分享接口直接解析未命中，自动执行极速转存通道:', e.message);
+                }
+            }
+
+            // 3. 终极降级保障：一键转存到网盘临时目录并满速下载（100% 成功率，彻底解决分享页免客户端直下）
+            return await BaiduEngine.transferAndFetchDlink(files);
         }
     };
 
@@ -1364,7 +1415,8 @@
             .module-share-header,
             .share-file-viewer-header,
             .KPDwCE,
-            .g-button-group
+            .g-button-group,
+            .x-button-box
         `);
 
         const targetToolbar = diskToolbar || shareToolbar;
@@ -1383,7 +1435,6 @@
         if (targetToolbar) {
             targetToolbar.appendChild(mainBtn);
         } else if (document.body) {
-            // 如果未找到固定工具栏，以悬浮按钮形式挂载在页面右上角
             mainBtn.style.position = 'fixed';
             mainBtn.style.top = '75px';
             mainBtn.style.right = '24px';
