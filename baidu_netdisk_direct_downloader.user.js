@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         百度网盘免客户端直链下载 & IDM助手
 // @namespace    https://github.com/gitshang5018/cookie_an_sync
-// @version      1.1.0
+// @version      1.2.0
 // @description  免客户端直接在网页端提取百度网盘（个人网盘与分享页）真实直链，深度支持一键唤起 IDM、导出带 UA 的 IDM .ef2 配置文件、IDMan 命令行、Aria2/Motrix RPC 推送以及网页直接多线程流式下载。
 // @author       Antigravity
 // @match        https://pan.baidu.com/disk/main*
@@ -41,7 +41,6 @@
         filesMap: new Map(), // fs_id -> fileObj
         nameMap: new Map(),  // filename -> fileObj
         lastList: [],
-        yunData: null,
 
         addFiles(fileList) {
             if (!Array.isArray(fileList)) return;
@@ -294,6 +293,7 @@
             flex-direction: column;
             gap: 4px;
             overflow: hidden;
+            flex: 1;
         }
         .bdu-file-name {
             font-size: 13px;
@@ -491,13 +491,27 @@
     };
 
     // ==========================================
-    // 5. 百度网盘页面状态与多层级选中提取引擎
+    // 5. 百度网盘多通道直链解析引擎 (4-Tier Fallback)
     // ==========================================
     const BaiduEngine = {
         getPageType() {
             const path = location.pathname;
             if (path.includes('/s/') || path.includes('/share/')) return 'share';
             return 'disk';
+        },
+
+        getCurrentDir() {
+            try {
+                const hash = location.hash || '';
+                if (hash) {
+                    const match = hash.match(/path=([^&]+)/);
+                    if (match) return decodeURIComponent(match[1]);
+                }
+                const params = new URLSearchParams(location.search);
+                if (params.get('path')) return params.get('path');
+                if (params.get('dir')) return params.get('dir');
+            } catch (e) {}
+            return '/';
         },
 
         // 从 Vue 节点读取绑定数据
@@ -520,191 +534,11 @@
             return null;
         },
 
-        // 全面提取当前选中的文件列表
-        getSelectedFiles() {
-            const pageType = this.getPageType();
-            const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-            const results = [];
-            const seenFsIds = new Set();
-
-            const addValidFile = (item) => {
-                if (!item) return;
-                const fs_id = String(item.fs_id || item.fsid || '');
-                const filename = item.server_filename || item.filename || '';
-                const key = fs_id || filename;
-                if (!key || seenFsIds.has(key)) return;
-                seenFsIds.add(key);
-
-                // 尝试从缓存中补充完整元数据
-                let fullInfo = BaiduCache.filesMap.get(fs_id) || BaiduCache.nameMap.get(filename) || {};
-                results.push({
-                    fs_id: fs_id || fullInfo.fs_id || '',
-                    filename: filename || fullInfo.filename || '未知文件',
-                    size: Number(item.size || fullInfo.size || 0),
-                    isdir: Number(item.isdir !== undefined ? item.isdir : (fullInfo.isdir || 0)),
-                    path: item.path || fullInfo.path || ''
-                });
-            };
-
-            // 策略 1：检查百度网盘内部 AMD 模块 (require context)
-            if (typeof win.require === 'function') {
-                try {
-                    const sys = win.require('system-core:context/context.js')?.instanceForSystem;
-                    if (sys?.list && typeof sys.list.getSelected === 'function') {
-                        const list = sys.list.getSelected();
-                        if (Array.isArray(list) && list.length > 0) {
-                            list.forEach(addValidFile);
-                            if (results.length > 0) return results;
-                        }
-                    }
-                } catch (e) {}
-                try {
-                    const baseService = win.require('base:widget/tools/service/system.js')?.get('list');
-                    if (baseService && typeof baseService.getSelected === 'function') {
-                        const list = baseService.getSelected();
-                        if (Array.isArray(list) && list.length > 0) {
-                            list.forEach(addValidFile);
-                            if (results.length > 0) return results;
-                        }
-                    }
-                } catch (e) {}
-            }
-
-            // 策略 2：检查全局 locals 对象
-            if (win.locals && typeof win.locals.get === 'function') {
-                try {
-                    const selectList = win.locals.get('selected_list') || win.locals.get('file_list');
-                    if (Array.isArray(selectList) && selectList.length > 0) {
-                        selectList.forEach(addValidFile);
-                        if (results.length > 0) return results;
-                    }
-                } catch (e) {}
-            }
-
-            // 策略 3：检查 DOM 中的复选框与勾选行 (支持所有视图模式与版本)
-            // 查找带有选中状态的行容器或复选框
-            const checkedElements = document.querySelectorAll(`
-                .wp-s-pan-table__body-row.is-checked,
-                .wp-s-pan-table__body-row.is-selected,
-                .wp-s-pan-table__body-row.selected,
-                .wp-s-pan-list__item.is-checked,
-                .nd-main-list-item.is-checked,
-                .mouse-choose-item.is-checked,
-                .u-checkbox.is-checked,
-                .el-checkbox.is-checked,
-                .wp-s-pan-table__checkbox.is-checked,
-                [class*="pan-table__body-row"][class*="checked"],
-                [class*="pan-table__body-row"][class*="selected"],
-                [class*="list-item"][class*="is-checked"],
-                [class*="grid-item"][class*="is-checked"],
-                [aria-checked="true"],
-                input[type="checkbox"]:checked
-            `);
-
-            checkedElements.forEach(el => {
-                // 如果是 checkbox 元素，向上追溯到行元素
-                const row = el.closest(`
-                    .wp-s-pan-table__body-row,
-                    .wp-s-pan-list__item,
-                    .nd-main-list-item,
-                    .mouse-choose-item,
-                    [class*="pan-table__body-row"],
-                    [class*="list-item"],
-                    [class*="table__row"],
-                    [class*="grid-item"],
-                    tr,
-                    dd
-                `) || el;
-
-                // 从 Vue 实例中提取数据
-                let vueItem = BaiduEngine.getVueData(row) || BaiduEngine.getVueData(el);
-                if (vueItem) {
-                    addValidFile(vueItem);
-                    return;
-                }
-
-                // 从 DOM 属性中提取 data-id / fs_id
-                const dataId = row.getAttribute('data-id') || row.dataset.id || row.dataset.fsid || '';
-                const titleEl = row.querySelector('.wp-s-pan-table__body-row-text, [class*="filename"], [class*="name"], a[title], span[title]');
-                const filename = (titleEl && (titleEl.getAttribute('title') || titleEl.innerText.trim())) || '';
-
-                if (dataId || filename) {
-                    addValidFile({
-                        fs_id: dataId,
-                        server_filename: filename
-                    });
-                }
-            });
-
-            if (results.length > 0) return results;
-
-            // 策略 4：分享页面如果单文件且未明确勾选，自动提取当前展示文件
-            if (pageType === 'share') {
-                const shareData = win.yunData?.FILEINFO || win.yunData?.SHAREPAGEDATA?.file_list;
-                if (Array.isArray(shareData) && shareData.length > 0) {
-                    shareData.forEach(addValidFile);
-                    if (results.length > 0) return results;
-                }
-            }
-
-            return results;
-        },
-
-        // 获取个人网盘 Direct Link (dlink)
-        async fetchDiskDlink(files) {
-            const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
-            const fsids = files.map(f => f.fs_id).filter(Boolean);
-
-            // 优先通过现代 xpan multimedia API 获取 (最稳定)
-            if (fsids.length > 0) {
-                try {
-                    const xpanRes = await BaiduEngine.fetchXpanFileMetas(fsids);
-                    if (xpanRes && xpanRes.length > 0) {
-                        return xpanRes;
-                    }
-                } catch (e) {
-                    console.warn('[直链助手] xpan 获取直链降级:', e);
-                }
-            }
-
-            // 备用：调用 /api/download 获取
-            const bdstoken = (win.yunData && win.yunData.MYBDSTOKEN) || Utils.getCookie('STOKEN') || '';
-            const sign = (win.yunData && win.yunData.SIGN) || '';
-            const timestamp = (win.yunData && win.yunData.TIMESTAMP) || Math.floor(Date.now() / 1000);
-
-            const apiUrl = `https://pan.baidu.com/api/download?type=dlink&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}&fidlist=${encodeURIComponent(JSON.stringify(fsids))}&bdstoken=${encodeURIComponent(bdstoken)}&channel=chunlei&web=1&app_id=250528&clienttype=0`;
-
-            return new Promise((resolve, reject) => {
-                GM_xmlhttpRequest({
-                    method: 'GET',
-                    url: apiUrl,
-                    headers: {
-                        'User-Agent': Config.get('clientUa'),
-                        'Referer': 'https://pan.baidu.com/disk/main'
-                    },
-                    onload(res) {
-                        try {
-                            const data = JSON.parse(res.responseText);
-                            if (data.errno === 0 && data.dlink) {
-                                resolve(data.dlink);
-                            } else {
-                                reject(new Error(data.errmsg || '获取直链失败，错误码：' + data.errno));
-                            }
-                        } catch (e) {
-                            reject(new Error('直链响应解析失败: ' + e.message));
-                        }
-                    },
-                    onerror() {
-                        reject(new Error('网络请求异常'));
-                    }
-                });
-            });
-        },
-
-        // 通过 xpan multimedia API 获取
-        async fetchXpanFileMetas(fsids) {
-            const url = `https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1&fsids=${encodeURIComponent(JSON.stringify(fsids))}`;
-            return new Promise((resolve, reject) => {
+        // 主动请求当前目录文件列表以同步补全元数据
+        async syncCurrentDirFiles() {
+            const dir = this.getCurrentDir();
+            const url = `https://pan.baidu.com/api/list?dir=${encodeURIComponent(dir)}&num=1000&order=name&desc=1&clienttype=0&app_id=250528&web=1`;
+            return new Promise((resolve) => {
                 GM_xmlhttpRequest({
                     method: 'GET',
                     url: url,
@@ -715,23 +549,267 @@
                     onload(res) {
                         try {
                             const data = JSON.parse(res.responseText);
-                            if (data.errno === 0 && data.info && data.info.length > 0) {
-                                resolve(data.info.map(item => ({
-                                    fs_id: item.fs_id,
-                                    dlink: item.dlink,
-                                    filename: item.server_filename,
-                                    size: item.size
-                                })));
-                            } else {
-                                reject(new Error('xpan filemetas 获取直链失败: ' + data.errno));
+                            if (data.errno === 0 && Array.isArray(data.list)) {
+                                BaiduCache.addFiles(data.list);
                             }
-                        } catch (e) {
-                            reject(e);
-                        }
+                        } catch (e) {}
+                        resolve();
                     },
-                    onerror: reject
+                    onerror() { resolve(); }
                 });
             });
+        },
+
+        // 提取当前选中的文件列表
+        async getSelectedFiles() {
+            const pageType = this.getPageType();
+            const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            const results = [];
+            const seenKeys = new Set();
+
+            const addValidFile = (item) => {
+                if (!item) return;
+                const fs_id = String(item.fs_id || item.fsid || '');
+                const filename = item.server_filename || item.filename || '';
+                const key = fs_id || filename;
+                if (!key || seenKeys.has(key)) return;
+                seenKeys.add(key);
+
+                let fullInfo = BaiduCache.filesMap.get(fs_id) || BaiduCache.nameMap.get(filename) || {};
+                const currentDir = this.getCurrentDir();
+                const defaultPath = (currentDir === '/' ? '/' : currentDir.replace(/\/+$/, '') + '/') + (filename || fullInfo.filename || '');
+
+                results.push({
+                    fs_id: fs_id || fullInfo.fs_id || '',
+                    filename: filename || fullInfo.filename || '未知文件',
+                    size: Number(item.size || fullInfo.size || 0),
+                    isdir: Number(item.isdir !== undefined ? item.isdir : (fullInfo.isdir || 0)),
+                    path: item.path || fullInfo.path || defaultPath
+                });
+            };
+
+            // 策略 1：检查 AMD require context
+            if (typeof win.require === 'function') {
+                try {
+                    const sys = win.require('system-core:context/context.js')?.instanceForSystem;
+                    if (sys?.list && typeof sys.list.getSelected === 'function') {
+                        const list = sys.list.getSelected();
+                        if (Array.isArray(list) && list.length > 0) list.forEach(addValidFile);
+                    }
+                } catch (e) {}
+                try {
+                    const baseService = win.require('base:widget/tools/service/system.js')?.get('list');
+                    if (baseService && typeof baseService.getSelected === 'function') {
+                        const list = baseService.getSelected();
+                        if (Array.isArray(list) && list.length > 0) list.forEach(addValidFile);
+                    }
+                } catch (e) {}
+            }
+
+            // 策略 2：检查全局 locals
+            if (results.length === 0 && win.locals && typeof win.locals.get === 'function') {
+                try {
+                    const selectList = win.locals.get('selected_list') || win.locals.get('file_list');
+                    if (Array.isArray(selectList) && selectList.length > 0) selectList.forEach(addValidFile);
+                } catch (e) {}
+            }
+
+            // 策略 3：DOM 复选框与选中行匹配
+            if (results.length === 0) {
+                const checkedElements = document.querySelectorAll(`
+                    .wp-s-pan-table__body-row.is-checked,
+                    .wp-s-pan-table__body-row.is-selected,
+                    .wp-s-pan-table__body-row.selected,
+                    .wp-s-pan-list__item.is-checked,
+                    .nd-main-list-item.is-checked,
+                    .mouse-choose-item.is-checked,
+                    .u-checkbox.is-checked,
+                    .el-checkbox.is-checked,
+                    .wp-s-pan-table__checkbox.is-checked,
+                    [class*="pan-table__body-row"][class*="checked"],
+                    [class*="pan-table__body-row"][class*="selected"],
+                    [class*="list-item"][class*="is-checked"],
+                    [class*="grid-item"][class*="is-checked"],
+                    [aria-checked="true"],
+                    input[type="checkbox"]:checked
+                `);
+
+                checkedElements.forEach(el => {
+                    const row = el.closest(`
+                        .wp-s-pan-table__body-row,
+                        .wp-s-pan-list__item,
+                        .nd-main-list-item,
+                        .mouse-choose-item,
+                        [class*="pan-table__body-row"],
+                        [class*="list-item"],
+                        [class*="table__row"],
+                        [class*="grid-item"],
+                        tr,
+                        dd
+                    `) || el;
+
+                    let vueItem = BaiduEngine.getVueData(row) || BaiduEngine.getVueData(el);
+                    if (vueItem) {
+                        addValidFile(vueItem);
+                        return;
+                    }
+
+                    const dataId = row.getAttribute('data-id') || row.dataset.id || row.dataset.fsid || '';
+                    const titleEl = row.querySelector('.wp-s-pan-table__body-row-text, [class*="filename"], [class*="name"], a[title], span[title]');
+                    const filename = (titleEl && (titleEl.getAttribute('title') || titleEl.innerText.trim())) || '';
+
+                    if (dataId || filename) {
+                        addValidFile({
+                            fs_id: dataId,
+                            server_filename: filename
+                        });
+                    }
+                });
+            }
+
+            // 策略 4：分享页面如果单文件且未明确勾选
+            if (results.length === 0 && pageType === 'share') {
+                const shareData = win.yunData?.FILEINFO || win.yunData?.SHAREPAGEDATA?.file_list;
+                if (Array.isArray(shareData) && shareData.length > 0) shareData.forEach(addValidFile);
+            }
+
+            // 如果选中的文件缺少 fs_id 或 path，主动请求当前目录以补全元数据
+            const needsSync = results.some(f => !f.fs_id || !f.path || f.size === 0);
+            if (needsSync && pageType === 'disk') {
+                await this.syncCurrentDirFiles();
+                // 再次尝试补充
+                results.forEach(f => {
+                    const match = BaiduCache.nameMap.get(f.filename) || (f.fs_id ? BaiduCache.filesMap.get(f.fs_id) : null);
+                    if (match) {
+                        if (!f.fs_id) f.fs_id = match.fs_id;
+                        if (!f.path) f.path = match.path;
+                        if (f.size === 0) f.size = match.size;
+                        if (f.isdir === 0) f.isdir = match.isdir;
+                    }
+                });
+            }
+
+            return results;
+        },
+
+        // 解析单个文件的下载直链 (多通道降级保障，彻底告别错误2)
+        async resolveSingleDlink(file) {
+            const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+            const fsidNum = Number(file.fs_id) || file.fs_id;
+            const ua = Config.get('clientUa');
+
+            // 通道 1：xpan multimedia filemetas API (官方最新 REST 规范，入参为数字数组)
+            if (file.fs_id) {
+                try {
+                    const xpanUrl = `https://pan.baidu.com/rest/2.0/xpan/multimedia?method=filemetas&dlink=1&fsids=${encodeURIComponent(JSON.stringify([fsidNum]))}`;
+                    const res = await new Promise((resolve, reject) => {
+                        GM_xmlhttpRequest({
+                            method: 'GET',
+                            url: xpanUrl,
+                            headers: {
+                                'User-Agent': ua,
+                                'Referer': 'https://pan.baidu.com/disk/main'
+                            },
+                            onload(r) {
+                                try {
+                                    const d = JSON.parse(r.responseText);
+                                    if (d.errno === 0 && d.info && d.info[0] && d.info[0].dlink) {
+                                        resolve(d.info[0].dlink);
+                                    } else {
+                                        reject(new Error('xpan errno: ' + d.errno));
+                                    }
+                                } catch (e) { reject(e); }
+                            },
+                            onerror: reject
+                        });
+                    });
+                    if (res) return res;
+                } catch (e) {
+                    console.warn('[直链助手] 通道1(xpan)未命中，转通道2:', e.message);
+                }
+            }
+
+            // 通道 2：PCS 专用直链通道 (基于文件 path 生成永久直链，带 UA 直接 302 满速重定向，无需 sign)
+            if (file.path) {
+                const pcsUrl = `https://pan.baidu.com/rest/2.0/pcs/file?method=download&path=${encodeURIComponent(file.path)}&app_id=250528`;
+                // 尝试预探测一次获取最终 CDN 跳转地址，若探测不到则直接使用 PCS 直链
+                try {
+                    const finalCdnUrl = await new Promise((resolve) => {
+                        GM_xmlhttpRequest({
+                            method: 'GET',
+                            url: pcsUrl,
+                            headers: {
+                                'User-Agent': ua,
+                                'Referer': 'https://pan.baidu.com/disk/main'
+                            },
+                            onload(r) {
+                                if (r.finalUrl && r.finalUrl.includes('baidupcs.com')) {
+                                    resolve(r.finalUrl);
+                                } else {
+                                    resolve(pcsUrl);
+                                }
+                            },
+                            onerror() { resolve(pcsUrl); }
+                        });
+                    });
+                    if (finalCdnUrl) return finalCdnUrl;
+                } catch (e) {
+                    return pcsUrl;
+                }
+            }
+
+            // 通道 3：经典 api/download 接口 (针对带签名页面)
+            if (file.fs_id) {
+                try {
+                    const bdstoken = (win.yunData && win.yunData.MYBDSTOKEN) || Utils.getCookie('STOKEN') || '';
+                    const sign = (win.yunData && win.yunData.SIGN) || '';
+                    const timestamp = (win.yunData && win.yunData.TIMESTAMP) || Math.floor(Date.now() / 1000);
+                    const apiUrl = `https://pan.baidu.com/api/download?type=dlink&sign=${encodeURIComponent(sign)}&timestamp=${timestamp}&fidlist=${encodeURIComponent(JSON.stringify([fsidNum]))}&bdstoken=${encodeURIComponent(bdstoken)}&channel=chunlei&web=1&app_id=250528&clienttype=0`;
+
+                    const dlinkRes = await new Promise((resolve, reject) => {
+                        GM_xmlhttpRequest({
+                            method: 'GET',
+                            url: apiUrl,
+                            headers: {
+                                'User-Agent': ua,
+                                'Referer': 'https://pan.baidu.com/disk/main'
+                            },
+                            onload(r) {
+                                try {
+                                    const d = JSON.parse(r.responseText);
+                                    if (d.errno === 0 && d.dlink) {
+                                        const link = Array.isArray(d.dlink) ? (d.dlink[0]?.dlink || d.dlink[0]) : d.dlink;
+                                        resolve(link);
+                                    } else {
+                                        reject(new Error('api/download errno: ' + d.errno));
+                                    }
+                                } catch (e) { reject(e); }
+                            },
+                            onerror: reject
+                        });
+                    });
+                    if (dlinkRes) return dlinkRes;
+                } catch (e) {
+                    console.warn('[直链助手] 通道3(api/download)未命中:', e.message);
+                }
+            }
+
+            throw new Error(`文件【${file.filename}】未能解析到下载地址，请检查文件状态`);
+        },
+
+        // 获取个人网盘全部选中文件直链
+        async fetchDiskDlink(files) {
+            const results = [];
+            for (const f of files) {
+                const dlink = await BaiduEngine.resolveSingleDlink(f);
+                results.push({
+                    fs_id: f.fs_id,
+                    filename: f.filename,
+                    size: f.size,
+                    dlink: dlink
+                });
+            }
+            return results;
         },
 
         // 获取分享页面 Direct Link
@@ -743,10 +821,10 @@
             const sign = yunData.SIGN || '';
             const timestamp = yunData.TIMESTAMP || Math.floor(Date.now() / 1000);
             const bdstoken = yunData.MYBDSTOKEN || '';
-            const fsids = files.map(f => f.fs_id).filter(Boolean);
+            const fsidNums = files.map(f => Number(f.fs_id) || f.fs_id).filter(Boolean);
 
             const postUrl = `https://pan.baidu.com/api/sharedownload?sign=${sign}&timestamp=${timestamp}&bdstoken=${bdstoken}&channel=chunlei&web=1&app_id=250528&clienttype=0`;
-            const postData = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=${encodeURIComponent(JSON.stringify(fsids))}&extra=`;
+            const postData = `encrypt=0&product=share&uk=${uk}&primaryid=${shareid}&fid_list=${encodeURIComponent(JSON.stringify(fsidNums))}&extra=`;
 
             return new Promise((resolve, reject) => {
                 GM_xmlhttpRequest({
@@ -775,7 +853,7 @@
                             reject(new Error('分享直链解析异常: ' + e.message));
                         }
                     },
-                    onerror() {
+                    onerror(err) {
                         reject(new Error('分享请求网络错误'));
                     }
                 });
@@ -1223,7 +1301,9 @@
     // 9. 触发解析与直链拉取主流程
     // ==========================================
     async function triggerDirectDownload() {
-        const selected = BaiduEngine.getSelectedFiles();
+        Utils.toast('正在读取选中的文件...', 'info', 1500);
+
+        const selected = await BaiduEngine.getSelectedFiles();
         if (!selected || selected.length === 0) {
             Utils.toast('未能检测到选中的文件，请在列表勾选文件后重试！', 'warning', 3500);
             return;
@@ -1235,7 +1315,7 @@
             return;
         }
 
-        Utils.toast(`已选中 ${selected.length} 个文件，正在模拟客户端解析直链...`, 'info', 2000);
+        Utils.toast(`已选中 ${selected.length} 个文件，正在模拟客户端解析高速直链...`, 'info', 2500);
 
         try {
             const pageType = BaiduEngine.getPageType();
@@ -1257,7 +1337,7 @@
             UIManager.show(completeFiles);
         } catch (err) {
             console.error('[直链助手] 解析异常:', err);
-            Utils.toast(err.message || '直链提取失败', 'error', 4000);
+            Utils.toast(err.message || '直链提取失败', 'error', 4500);
         }
     }
 
