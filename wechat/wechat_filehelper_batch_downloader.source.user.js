@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         微信文件传输助手网页版 批量下载工具 (输入栏原生工具条版)
-// @namespace    https://github.com/gitshang5018/wechat-filehelper-downloader
-// @version      2.7.0
-// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，零弹窗、高颜值、一键批量高速直下！
+// @name         微信文件传输助手网页版 批量下载工具 (后台全量抓取+一次性批量保存版)
+// @namespace    https://github.com/wechat-filehelper-downloader
+// @version      2.8.0
+// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台先全量读取数据流到内存、完成后再一次性批量保存！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
 // @grant        GM_xmlhttpRequest
@@ -54,6 +54,36 @@
         if (!url || typeof url !== 'string') return '';
         const m = url.match(/[?&]MsgID=([^&#]+)/i) || url.match(/[?&]msgid=([^&#]+)/i) || url.match(/[?&]msg_id=([^&#]+)/i);
         return m ? m[1] : '';
+    }
+
+    /**
+     * 并发限制调度器 (Map Limit)
+     */
+    async function mapLimit(items, concurrency, fn) {
+        const results = [];
+        let index = 0;
+        const total = items.length;
+
+        async function worker() {
+            while (index < total) {
+                const curIdx = index++;
+                const item = items[curIdx];
+                try {
+                    const res = await fn(item, curIdx);
+                    results[curIdx] = res;
+                } catch (err) {
+                    results[curIdx] = null;
+                }
+            }
+        }
+
+        const workers = [];
+        const numWorkers = Math.min(concurrency, total);
+        for (let i = 0; i < numWorkers; i++) {
+            workers.push(worker());
+        }
+        await Promise.all(workers);
+        return results;
     }
 
     /**
@@ -484,7 +514,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.7.0 toolbar ready.');
+        console.log('[WeChat Downloader] v2.8.0 engine ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -967,7 +997,7 @@
     }
 
     // ==========================================
-    // 5. 极速直下核心 (Direct Batch Downloader)
+    // 5. 极速直下与后台数据流抓取引擎 (Background Fetch + Batch Save Engine)
     // ==========================================
     function triggerUserNativeClick(el) {
         if (!el) return false;
@@ -1143,7 +1173,7 @@
     }
 
     /**
-     * 一键批量高速直下全部文件
+     * 后台全量抓取到内存 + 完成后一次性批量落盘保存
      */
     async function startBatchDownload() {
         const selectedItems = getFilteredItems();
@@ -1153,41 +1183,60 @@
         }
 
         State.isDownloading = true;
-        showInlineProgress(selectedItems.length);
+        const total = selectedItems.length;
+        showInlineProgress(total);
+
+        // ===== 阶段 1：在后台将全部文件数据流并发读取到内存中 =====
+        updateInlineProgress(0, total, '正在后台读取数据流...');
+
+        let fetchedCount = 0;
+        const fetchedList = await mapLimit(selectedItems, 3, async (item) => {
+            if (!State.isDownloading) return null;
+            try {
+                const blob = await Promise.race([
+                    fetchFileBlob(item),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('请求超时')), 8000))
+                ]);
+                fetchedCount++;
+                updateInlineProgress(fetchedCount, total, `已读取: ${item.name}`);
+                return { item, blob, name: item.name };
+            } catch (e) {
+                console.warn(`[WeChat Downloader] 读取异常: ${item.name}`, e);
+                fetchedCount++;
+                updateInlineProgress(fetchedCount, total, `读取失败: ${item.name}`);
+                return { item, blob: null, name: item.name, error: e.message };
+            }
+        });
+
+        if (!State.isDownloading) {
+            hideInlineProgress();
+            return;
+        }
+
+        // ===== 阶段 2：数据全部就绪后，一次性批量极速保存 =====
+        const validItems = fetchedList.filter(x => x && (x.blob || (x.item && x.item.url)));
+        updateInlineProgress(total, total, `🚀 数据已全部抓取就绪，正在批量保存 (${validItems.length} 项)...`);
 
         let successCount = 0;
         let failCount = 0;
 
-        try {
-            for (let i = 0; i < selectedItems.length; i++) {
-                if (!State.isDownloading) break;
-
-                const item = selectedItems[i];
-                updateInlineProgress(i + 1, selectedItems.length, item.name);
-
-                try {
-                    const blob = await Promise.race([
-                        fetchFileBlob(item),
-                        new Promise((_, reject) => setTimeout(() => reject(new Error('请求超时')), 8000))
-                    ]);
-
-                    await downloadBlobOrUrl(blob, item.name, item.url);
-                    successCount++;
-                    await sleep(400);
-                } catch (e) {
-                    console.warn(`[WeChat Downloader] 下载异常: ${item.name}`, e);
-                    failCount++;
-                    await sleep(300);
-                }
+        for (let i = 0; i < validItems.length; i++) {
+            const { item, blob, name } = validItems[i];
+            try {
+                await downloadBlobOrUrl(blob, name, item.url);
+                successCount++;
+                await sleep(150); // 微小间隔确保浏览器平滑落盘
+            } catch (e) {
+                failCount++;
             }
-
-            let summary = `✅ 批量下载完成！成功 ${successCount} 项`;
-            if (failCount > 0) summary += `，失败 ${failCount} 项`;
-            showToast(summary, 'success');
-        } finally {
-            State.isDownloading = false;
-            setTimeout(() => hideInlineProgress(), 1200);
         }
+
+        let summary = `✅ 批量下载完成！成功保存 ${successCount} 项`;
+        if (failCount > 0) summary += `，失败 ${failCount} 项`;
+        showToast(summary, 'success');
+
+        State.isDownloading = false;
+        setTimeout(() => hideInlineProgress(), 1200);
     }
 
     function sleep(ms) {
@@ -1502,7 +1551,6 @@
      * 将工具条直接注入到底部文件夹图标 (.chat-panel__input-operations) 同一行
      */
     function injectNativeInputOperationsBar() {
-        // 清理旧的顶部工具条
         const oldTopBar = document.getElementById('wx-native-action-bar');
         if (oldTopBar) oldTopBar.remove();
 
@@ -1547,10 +1595,8 @@
                 </div>
             `;
 
-            // 追加到原生上传文件图标右侧
             inputOps.appendChild(bar);
 
-            // 进度条挂载在输入框顶部
             const chatInput = document.querySelector('.chat-panel__input');
             if (chatInput && !document.getElementById('wx-native-progress-wrap')) {
                 const prog = document.createElement('div');
@@ -1619,12 +1665,12 @@
         if (wrap) wrap.classList.remove('show');
     }
 
-    function updateInlineProgress(current, total, filename) {
+    function updateInlineProgress(current, total, textDesc) {
         const bar = document.getElementById('wx-native-progress-bar');
         const text = document.getElementById('wx-native-progress-text');
         const percent = total > 0 ? Math.round((current / total) * 100) : 0;
         if (bar) bar.style.width = percent + '%';
-        if (text) text.textContent = `[${current}/${total}] (${percent}%) ${filename}`;
+        if (text) text.textContent = `[${current}/${total}] (${percent}%) ${textDesc}`;
     }
 
     function showToast(msg, type = 'info') {
@@ -1653,7 +1699,6 @@
         setupNetworkHooks();
         injectStyles();
 
-        // 清理旧残留
         document.getElementById('wx-native-action-bar')?.remove();
         document.getElementById('wx-input-dl-btn')?.remove();
         document.getElementById('wx-dl-float-btn')?.remove();
