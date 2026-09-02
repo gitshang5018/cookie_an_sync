@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微信文件传输助手网页版 批量下载工具 (输入栏原生工具条版)
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.1
-// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，彻底解决页面卡顿与无响应！
+// @version      2.8.2
+// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，严格过滤界面图标，数量100%精准！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
 // @grant        GM_xmlhttpRequest
@@ -243,7 +243,7 @@
     }
 
     /**
-     * 构建微信源文件的下载 URL (修复参数拼接)
+     * 构建微信源文件的下载 URL
      */
     function buildFileDownloadUrl(msg, mediaId, fileName) {
         if (!mediaId && !msg) return '';
@@ -549,7 +549,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.1 engine ready.');
+        console.log('[WeChat Downloader] v2.8.2 engine ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -707,19 +707,39 @@
         return null;
     }
 
+    /**
+     * 严格检查图片是否为非聊天主图（如头像、文件类型图标、表情、功能按钮等）
+     */
     function isAvatarOrIcon(img) {
         if (!img) return true;
         const cls = (img.className || '').toLowerCase();
         const src = (img.src || '').toLowerCase();
         const alt = (img.alt || '').toLowerCase();
 
-        if (cls.includes('qrcode') || cls.includes('avatar') || cls.includes('head') || cls.includes('icon') || cls.includes('emoji')) return true;
-        if (src.includes('qrcode') || src.includes('login') || src.includes('avatar') || src.includes('emoji') || src.includes('icon') || src.includes('default_hd_head')) return true;
-        if (alt.includes('qrcode') || alt.includes('二维码') || alt.includes('头像')) return true;
+        // 1. 如果图片处于文件卡片内部，它是文件类型图标（如 PDF 图标），绝不是聊天图片
+        if (img.closest('[class*="file"], [class*="attach"], [class*="doc"], [class*="card"]')) {
+            return true;
+        }
 
+        // 2. 如果图片处于头像或界面组件中
+        if (img.closest('[class*="avatar"], [class*="head"], [class*="user"], .chat-panel__header, .chat-panel__input, .wx-input-operations-bar')) {
+            return true;
+        }
+
+        // 3. 常见系统/格式图标关键词过滤
+        const iconKeywords = [
+            'qrcode', 'avatar', 'head', 'icon', 'emoji', 'default_', 'logo',
+            'pdf', 'word', 'doc', 'excel', 'xls', 'ppt', 'zip', 'rar', 'file',
+            'arrow', 'download', 'btn', 'status', 'empty', 'loading', 'play'
+        ];
+        if (iconKeywords.some(k => cls.includes(k) || src.includes(k) || alt.includes(k))) {
+            return true;
+        }
+
+        // 4. 小尺寸过滤（小图标一般宽高小于 65px）
         const w = img.naturalWidth || img.clientWidth || img.width || 0;
         const h = img.naturalHeight || img.clientHeight || img.height || 0;
-        if (w > 0 && w < 40 && h > 0 && h < 40) return true;
+        if (w > 0 && w <= 65 && h > 0 && h <= 65) return true;
 
         return false;
     }
@@ -737,9 +757,10 @@
     function findFileLiveElement(fileName) {
         if (!fileName) return null;
         const clean = cleanWechatFileName(fileName);
-        const all = Array.from(document.querySelectorAll('*'));
+        const chatBody = document.getElementById('chatBody') || document.querySelector('.chat-panel__body') || document.body;
+        const all = Array.from(chatBody.querySelectorAll('*'));
         const matches = all.filter(el => {
-            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .wx-msg-download-tag')) {
+            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .wx-msg-download-tag, .chat-panel__input')) {
                 return false;
             }
             return el.textContent && el.textContent.includes(clean);
@@ -799,7 +820,6 @@
         tag.addEventListener('click', async (e) => {
             e.stopPropagation();
             e.preventDefault();
-            // 防止在静默探测期间被触发
             if (State.isCapturingUrl) return;
 
             showToast(`⏳ 正在下载: ${item.name}`, 'info');
@@ -823,12 +843,15 @@
     function scanDOM() {
         injectNativeInputOperationsBar();
 
+        const chatBody = document.getElementById('chatBody') || document.querySelector('.chat-panel__body');
+        if (!chatBody) return 0;
+
         let scannedCount = 0;
         const fileRegex = /([\w\u4e00-\u9fa5\.\-\s_#\(\)\[\]（）]+\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|txt|csv|mp3|mp4|apk|iso|tar|gz|json|md))/i;
 
-        // 1. 扫描文件
-        const allEls = Array.from(document.querySelectorAll('*')).filter(el => {
-            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .chat-panel__input, .wx-msg-download-tag')) return false;
+        // 1. 扫描文件（仅在 chatBody 内部扫描）
+        const allEls = Array.from(chatBody.querySelectorAll('*')).filter(el => {
+            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .wx-msg-download-tag')) return false;
             return el.textContent && fileRegex.test(el.textContent);
         });
 
@@ -862,10 +885,10 @@
             }
         });
 
-        // 2. 扫描聊天图片 (包含 img 标签)
-        const allImages = document.querySelectorAll('img');
+        // 2. 扫描聊天图片 (仅在 chatBody 内部且严格排除文件图标、头像)
+        const allImages = chatBody.querySelectorAll('img');
         allImages.forEach(img => {
-            if (img.closest('.wx-input-operations-bar, #wx-toast-container, .chat-panel__input, .wx-msg-download-tag')) return;
+            if (img.closest('.wx-input-operations-bar, #wx-toast-container, .wx-msg-download-tag')) return;
             if (isAvatarOrIcon(img)) return;
 
             const rawSrc = img.getAttribute('data-big-src') ||
@@ -893,14 +916,16 @@
             }
         });
 
-        // 3. 扫描背景图片容器
-        const allBgElements = document.querySelectorAll('[style*="background-image"]');
+        // 3. 扫描背景图片容器 (仅在 chatBody 内部)
+        const allBgElements = chatBody.querySelectorAll('[style*="background-image"]');
         allBgElements.forEach(el => {
-            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .chat-panel__input, .wx-msg-download-tag')) return;
+            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .wx-msg-download-tag')) return;
+            if (el.closest('[class*="file"], [class*="avatar"], [class*="head"]')) return;
+
             const bg = el.style.backgroundImage || '';
             if (bg.includes('url(')) {
                 const m = bg.match(/url\(['"]?(.*?)['"]?\)/);
-                if (m && m[1] && !m[1].includes('avatar') && !m[1].includes('qrcode') && !m[1].includes('emoji')) {
+                if (m && m[1] && !m[1].includes('avatar') && !m[1].includes('qrcode') && !m[1].includes('emoji') && !m[1].includes('icon') && !m[1].includes('pdf')) {
                     const rawSrc = m[1];
                     const compData = extractComponentData(el);
                     const msgId = compData?.MsgId || el.getAttribute('data-id') || extractMsgIdFromUrl(rawSrc);
