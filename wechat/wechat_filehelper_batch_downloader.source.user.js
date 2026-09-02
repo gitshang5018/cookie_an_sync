@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微信文件传输助手网页版 批量下载工具 (输入栏原生工具条版)
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.5
-// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，彻底根除任何HTM格式错误！
+// @version      2.8.6
+// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，下载真实原图与原文件！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
 // @grant        GM_xmlhttpRequest
@@ -27,7 +27,7 @@
     // ==========================================
     const State = {
         items: new Map(), // key: uniqueKey -> Item Object
-        blobs: new Map(), // key: url/filename -> Blob instance
+        blobs: new Map(), // key: url -> Blob instance
         filterType: 'all', // 'all', 'image', 'file', 'video'
         searchQuery: '',
         isAutoScrolling: false,
@@ -133,7 +133,7 @@
     }
 
     /**
-     * 高清原图 URL 转换引擎
+     * 高清原图 URL 转换引擎 (将 type=slave 彻底替换为 type=big)
      */
     function getHdMediaUrl(url, msgId) {
         if (!url || typeof url !== 'string') return url;
@@ -181,7 +181,7 @@
         name = name.replace(/^(微信用户|我|好友|文件)[:：\s]*/i, '');
         name = name.replace(/^[\d]{1,2}:[\d]{2}[:\s]*/, '');
 
-        const match = name.match(/([\w\u4e00-\u9fa5\.\-\s_#\(\)\[\]（）]+\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|cdr|psd|ai|txt|csv|mp3|mp4|apk|iso|tar|gz|json|md))/i);
+        const match = name.match(/([\w\u4e00-\u9fa5\.\-\s_#\(\)\[\]（）]+\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|cdr|psd|ai|txt|csv|mp3|mp4|apk|iso|tar|gz|json|md|wps|et|dps))/i);
         if (match) {
             return match[1].trim();
         }
@@ -234,7 +234,7 @@
     }
 
     /**
-     * 从 <img> 元素直接提取二进制 Blob (图片100%真实保证)
+     * 从 <img> 元素提取二进制 Blob (仅作为无原图时的最终兜底)
      */
     function getBlobFromImageElement(imgEl) {
         if (!imgEl) return Promise.resolve(null);
@@ -503,7 +503,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.5 ready.');
+        console.log('[WeChat Downloader] v2.8.6 ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -528,26 +528,15 @@
         if (Array.isArray(msgList)) {
             msgList.forEach(msg => handleRawMessage(msg));
         }
-
-        for (const key of Object.keys(obj)) {
-            if (typeof obj[key] === 'object' && obj[key] !== null) {
-                if (key !== 'AddMsgList' && key !== 'messages' && Array.isArray(obj[key])) {
-                    obj[key].forEach(item => {
-                        if (item && (item.MsgType || item.msg_type || item.fileName || item.file_name)) {
-                            handleRawMessage(item);
-                        }
-                    });
-                }
-            }
-        }
     }
 
     function handleRawMessage(msg) {
         if (!msg) return;
         const msgType = msg.MsgType || msg.msg_type || msg.type;
-        const msgId = msg.MsgId || msg.msg_id || msg.id || ('msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 6));
-        const content = msg.Content || msg.content || '';
+        const msgId = msg.MsgId || msg.msg_id || msg.id;
+        if (!msgId) return;
 
+        const content = msg.Content || msg.content || '';
         const skey = State.authParams.skey ? `&skey=${encodeURIComponent(State.authParams.skey)}` : '';
         const passTicket = State.authParams.pass_ticket ? `&pass_ticket=${encodeURIComponent(State.authParams.pass_ticket)}` : '';
 
@@ -625,7 +614,7 @@
     }
 
     // ==========================================
-    // 3. 精准 DOM 扫描 (Message-Scoped Scanner)
+    // 3. 精准 DOM 扫描 (Exact Message-Scoped Scanner)
     // ==========================================
     function extractMsgFromElement(el) {
         if (!el) return null;
@@ -653,26 +642,6 @@
         return null;
     }
 
-    function isAvatarOrIcon(img) {
-        if (!img) return true;
-        const cls = (img.className || '').toLowerCase();
-        const src = (img.src || '').toLowerCase();
-        const alt = (img.alt || '').toLowerCase();
-
-        if (cls.includes('avatar') || cls.includes('head') || cls.includes('icon') || cls.includes('qrcode') || cls.includes('emoji')) {
-            return true;
-        }
-        if (img.closest('.msg-avatar, .file-icon, .chat-panel__header, .chat-panel__input, .wx-input-operations-bar')) {
-            return true;
-        }
-
-        const w = img.naturalWidth || img.clientWidth || img.width || 0;
-        const h = img.naturalHeight || img.clientHeight || img.height || 0;
-        if (w > 0 && w <= 65 && h > 0 && h <= 65) return true;
-
-        return false;
-    }
-
     function hashString(str) {
         if (!str) return Math.random().toString(36).slice(2);
         let hash = 0;
@@ -688,7 +657,7 @@
      */
     function attachInlineTagToElement(item) {
         if (!item.element) return;
-        const parentCard = item.element.querySelector('.msg-file__content') || item.element.querySelector('.msg-item__content') || item.element;
+        const parentCard = item.element.querySelector('.msg-file__content') || item.element.querySelector('.msg-image') || item.element.querySelector('.msg-item__content') || item.element;
         if (!parentCard || parentCard.querySelector('.wx-msg-download-tag')) return;
 
         const tag = document.createElement('div');
@@ -730,7 +699,7 @@
     }
 
     /**
-     * 针对每条消息精确解析，避免误判图标
+     * 针对每条消息精确解析，保证数量 100% 对应且图片取高清原图
      */
     function scanDOM() {
         injectNativeInputOperationsBar();
@@ -742,7 +711,7 @@
         let scannedCount = 0;
 
         msgItems.forEach(msgEl => {
-            // 1. 检查是否为文件消息
+            // 1. 检查是否为文件消息 (.msg-file)
             const fileTitleEl = msgEl.querySelector('.msg-file__title');
             const fileCard = msgEl.querySelector('.msg-file');
             
@@ -772,29 +741,56 @@
                     });
                     scannedCount++;
                 }
-                return; // 文件消息处理完毕，不处理子图片
+                return; // 文件消息处理完毕
             }
 
-            // 2. 检查是否为图片消息 (严格排除头像与文件图标)
-            const chatImg = msgEl.querySelector('img:not(.msg-avatar):not(.file-icon):not([class*="avatar"])') ||
-                            msgEl.querySelector('.msg-img, img.picture, img.content-img, img[data-big-src]');
-            if (chatImg && !isAvatarOrIcon(chatImg)) {
-                const rawSrc = chatImg.getAttribute('data-big-src') || chatImg.getAttribute('data-src') || chatImg.src;
-                if (rawSrc && !rawSrc.startsWith('data:image/svg')) {
+            // 2. 检查是否为图片消息 (.msg-image)
+            const imageCard = msgEl.querySelector('.msg-image');
+            if (imageCard) {
+                const chatImg = imageCard.querySelector('img');
+                const dlBtn = imageCard.querySelector('.icon__download') || msgEl.querySelector('.icon__download');
+                const rawSrc = chatImg ? (chatImg.getAttribute('data-big-src') || chatImg.getAttribute('data-src') || chatImg.src) : '';
+                
+                if (rawSrc) {
                     const compData = extractMsgFromElement(msgEl);
                     const msgId = compData?.MsgId || extractMsgIdFromUrl(rawSrc);
+                    const hdUrl = getHdMediaUrl(rawSrc, msgId);
+
                     addItem({
                         id: msgId ? `image_msg_${msgId}` : `image_${hashString(rawSrc)}`,
                         msgId: msgId,
                         type: 'image',
                         name: `image_${msgId || Date.now()}.jpg`,
-                        url: getHdMediaUrl(rawSrc, msgId),
+                        url: hdUrl,
                         previewUrl: rawSrc,
                         rawMsg: compData,
-                        element: chatImg
+                        element: chatImg || imageCard,
+                        downloadBtn: dlBtn
                     });
                     scannedCount++;
                 }
+                return; // 图片消息处理完毕
+            }
+
+            // 3. 检查是否为视频消息
+            const videoCard = msgEl.querySelector('.msg-video, video');
+            if (videoCard) {
+                const compData = extractMsgFromElement(msgEl);
+                const msgId = compData?.MsgId || ('video_' + Date.now());
+                const dlBtn = msgEl.querySelector('.icon__download');
+
+                addItem({
+                    id: `video_${msgId}`,
+                    msgId: msgId,
+                    type: 'video',
+                    name: `video_${msgId}.mp4`,
+                    url: `/cgi-bin/mmwebwx-bin/webwxgetvideo?msgid=${msgId}`,
+                    previewUrl: '',
+                    rawMsg: compData,
+                    element: videoCard,
+                    downloadBtn: dlBtn
+                });
+                scannedCount++;
             }
         });
 
@@ -909,7 +905,7 @@
     }
 
     // ==========================================
-    // 5. 极速直下与后台数据流抓取引擎 (Safe Fetch & Direct Save Engine)
+    // 5. 极速直下与后台数据流抓取引擎 (Safe Fetch & HD Image Engine)
     // ==========================================
     async function fetchBinaryBlobFromUrl(rawUrl, fileName) {
         if (!rawUrl || rawUrl.startsWith('#') || rawUrl.startsWith('javascript')) return null;
@@ -924,7 +920,7 @@
         // 1. 原生 Fetch
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 3000);
+            const timeoutId = setTimeout(() => controller.abort(), 4000);
 
             const res = await fetch(absUrl, { credentials: 'include', signal: controller.signal });
             clearTimeout(timeoutId);
@@ -950,13 +946,13 @@
                         resolved = true;
                         resolve(null);
                     }
-                }, 4000);
+                }, 5000);
 
                 GM_xmlhttpRequest({
                     method: 'GET',
                     url: absUrl,
                     responseType: 'blob',
-                    timeout: 4000,
+                    timeout: 5000,
                     headers: {
                         'Referer': window.location.href,
                         'Accept': '*/*'
@@ -999,24 +995,12 @@
             return item.blob;
         }
 
-        // 1. 如果是图片：优先从 Canvas / 页面 DOM 元素直接提取二进制（100% 真实，绝对不会是 HTML）
-        if (item.type === 'image') {
-            const imgEl = item.element || (item.msgId ? document.querySelector(`[data-id="${item.msgId}"]`) : null);
-            if (imgEl && imgEl.tagName === 'IMG') {
-                const canvasBlob = await getBlobFromImageElement(imgEl);
-                if (canvasBlob && isRealBinaryBlob(canvasBlob, item.name)) {
-                    item.blob = canvasBlob;
-                    return canvasBlob;
-                }
-            }
-        }
-
         const candidateUrls = [];
-        if (item.dataUrl) candidateUrls.push(item.dataUrl);
         let finalUrl = item.type === 'image' ? getHdMediaUrl(item.url, item.msgId) : item.url;
         if (finalUrl && !finalUrl.startsWith('#') && !finalUrl.startsWith('javascript')) {
             candidateUrls.push(finalUrl);
         }
+        if (item.dataUrl) candidateUrls.push(item.dataUrl);
         if (item.previewUrl && !candidateUrls.includes(item.previewUrl)) {
             candidateUrls.push(item.previewUrl);
         }
@@ -1028,6 +1012,7 @@
             }
         }
 
+        // 1. 尝试从高清网络接口抓取真实大图/原文件
         for (const u of candidateUrls) {
             const blob = await fetchBinaryBlobFromUrl(u, item.name);
             if (blob && isRealBinaryBlob(blob, item.name)) {
@@ -1036,12 +1021,15 @@
             }
         }
 
-        // 2. 图片最后兜底：从当前 element 再次尝试 canvas 提取
-        if (item.type === 'image' && item.element) {
-            const canvasBlob = await getBlobFromImageElement(item.element);
-            if (canvasBlob && isRealBinaryBlob(canvasBlob, item.name)) {
-                item.blob = canvasBlob;
-                return canvasBlob;
+        // 2. 仅当图片无法通过高清接口获取且无原生按钮时，才使用页面 DOM 提取作为最后兜底
+        if (item.type === 'image' && !item.downloadBtn) {
+            const imgEl = item.element?.tagName === 'IMG' ? item.element : item.element?.querySelector('img');
+            if (imgEl) {
+                const canvasBlob = await getBlobFromImageElement(imgEl);
+                if (canvasBlob && isRealBinaryBlob(canvasBlob, item.name)) {
+                    item.blob = canvasBlob;
+                    return canvasBlob;
+                }
             }
         }
 
@@ -1057,7 +1045,7 @@
     }
 
     /**
-     * 极速无卡顿批量下载调度器 (保障 100% 真实原文件格式，绝不落盘 HTML)
+     * 极速无卡顿批量下载调度器 (保障 100% 真实原文件与高清原图，绝不落盘 HTML)
      */
     async function startBatchDownload() {
         const selectedItems = getFilteredItems();
@@ -1070,8 +1058,8 @@
         const total = selectedItems.length;
         showInlineProgress(total);
 
-        // ===== 阶段 1：在后台尝试读取二进制数据流 =====
-        updateInlineProgress(0, total, '正在后台准备数据流...');
+        // ===== 阶段 1：在后台尝试读取真实二进制数据流 (支持高清大图与原文件) =====
+        updateInlineProgress(0, total, '正在准备高清数据流...');
 
         let fetchedCount = 0;
         const fetchedList = await mapLimit(selectedItems, 2, async (item) => {
@@ -1102,34 +1090,24 @@
         for (let i = 0; i < fetchedList.length; i++) {
             const { item, blob, name } = fetchedList[i];
             try {
-                // 1. 如果成功抓取到真实二进制 Blob，直接极速落盘 (图片/文件通用)
+                // 1. 如果成功抓取到高清原图或真实文件的 Blob，直接落盘
                 if (blob && isRealBinaryBlob(blob, name)) {
                     saveBlob(blob, name);
                     successCount++;
                 }
-                // 2. 如果后台请求被鉴权拦截或返回HTML，且该项有原生下载按钮，触发原生专属下载
+                // 2. 如果后台请求未鉴权，直接触发微信官方绿色下载按钮 (图片与文件均有该按钮，直达官方原图原件通道)
                 else if (item.downloadBtn) {
                     item.downloadBtn.click();
                     successCount++;
                 }
-                // 3. 图片若无blob，绝不直下可能为HTML的URL，而是尝试使用页面上的图片节点
-                else if (item.type === 'image' && item.element) {
-                    const fallbackBlob = await getBlobFromImageElement(item.element);
-                    if (fallbackBlob && isRealBinaryBlob(fallbackBlob, name)) {
-                        saveBlob(fallbackBlob, name);
-                        successCount++;
-                    } else {
-                        failCount++;
-                    }
-                }
-                // 4. 兜底直下有效 URL
+                // 3. 兜底直下有效 URL (非HTML页面)
                 else if (item.url && !item.url.startsWith('#') && !item.url.startsWith('javascript')) {
                     saveDirectUrl(item.url, name);
                     successCount++;
                 } else {
                     failCount++;
                 }
-                await sleep(200);
+                await sleep(250);
             } catch (e) {
                 failCount++;
             }
@@ -1459,7 +1437,7 @@
 
             bar.innerHTML = `
                 <div class="wx-bar-left">
-                    <button class="wx-btn-main" id="wx-bar-btn-batch" title="一键批量下载当前所有筛选出的真实文件">
+                    <button class="wx-btn-main" id="wx-bar-btn-batch" title="一键批量下载当前所有筛选出的真实文件与高清原图">
                         <svg class="wx-svg-icon" viewBox="0 0 24 24" width="13" height="13"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" fill="currentColor"/></svg>
                         <span>批量下载</span>
                         <span class="wx-badge-num" id="wx-bar-badge-count">0</span>
