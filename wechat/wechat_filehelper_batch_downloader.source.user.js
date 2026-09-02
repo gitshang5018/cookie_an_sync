@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微信文件传输助手网页版 批量下载工具 (输入栏原生工具条版)
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.2
-// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，严格过滤界面图标，数量100%精准！
+// @version      2.8.3
+// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，彻底解决页面卡顿与无响应！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
 // @grant        GM_xmlhttpRequest
@@ -23,7 +23,7 @@
     'use strict';
 
     // ==========================================
-    // 1. 全局状态与静默捕获器 (State & Silent Interceptor)
+    // 1. 全局状态 (State)
     // ==========================================
     const State = {
         items: new Map(), // key: uniqueKey -> Item Object
@@ -33,7 +33,6 @@
         isAutoScrolling: false,
         autoScrollTimer: null,
         isDownloading: false,
-        downloadProgress: { current: 0, total: 0, filename: '', percent: 0 },
         authParams: {
             skey: '',
             pass_ticket: '',
@@ -42,8 +41,6 @@
             dataTicket: '',
             currentUser: ''
         },
-        isCapturingUrl: false,
-        capturedUrl: null,
         elementCounter: 0
     };
 
@@ -89,87 +86,9 @@
     }
 
     /**
-     * 多文件安全下载触发器 (优先 GM_download 绕过浏览器批量拦截)
+     * 将 Blob 实例极速保存到本地
      */
-    function downloadBlobOrUrl(blob, filename, fallbackUrl) {
-        return new Promise((resolve) => {
-            if (typeof GM_download === 'function') {
-                if (blob) {
-                    const blobUrl = URL.createObjectURL(blob);
-                    try {
-                        GM_download({
-                            url: blobUrl,
-                            name: filename,
-                            saveAs: false,
-                            onload: () => {
-                                setTimeout(() => URL.revokeObjectURL(blobUrl), 10000);
-                                resolve(true);
-                            },
-                            onerror: () => {
-                                saveBlobFallback(blob, filename);
-                                resolve(true);
-                            },
-                            ontimeout: () => {
-                                saveBlobFallback(blob, filename);
-                                resolve(true);
-                            }
-                        });
-                        return;
-                    } catch (e) {
-                        saveBlobFallback(blob, filename);
-                        resolve(true);
-                        return;
-                    }
-                } else if (fallbackUrl && !fallbackUrl.startsWith('#') && !fallbackUrl.startsWith('javascript')) {
-                    try {
-                        GM_download({
-                            url: fallbackUrl,
-                            name: filename,
-                            saveAs: false,
-                            onload: () => resolve(true),
-                            onerror: () => {
-                                triggerDirectLinkDownload(fallbackUrl, filename);
-                                resolve(true);
-                            },
-                            ontimeout: () => {
-                                triggerDirectLinkDownload(fallbackUrl, filename);
-                                resolve(true);
-                            }
-                        });
-                        return;
-                    } catch (e) {
-                        triggerDirectLinkDownload(fallbackUrl, filename);
-                        resolve(true);
-                        return;
-                    }
-                }
-            }
-
-            if (blob) {
-                saveBlobFallback(blob, filename);
-            } else if (fallbackUrl && !fallbackUrl.startsWith('#') && !fallbackUrl.startsWith('javascript')) {
-                triggerDirectLinkDownload(fallbackUrl, filename);
-            }
-            resolve(true);
-        });
-    }
-
-    function triggerDirectLinkDownload(url, filename) {
-        if (!url || url.startsWith('#') || url.startsWith('javascript')) return;
-        const a = document.createElement('a');
-        a.href = url;
-        if (filename) a.download = filename;
-        a.target = '_blank';
-        a.rel = 'noopener noreferrer';
-        a.style.display = 'none';
-        document.body.appendChild(a);
-        try {
-            a.click();
-        } catch (e) {}
-        setTimeout(() => a.remove(), 2000);
-    }
-
-    function saveBlobFallback(blob, filename) {
+    function saveBlob(blob, filename) {
         if (!blob) return;
         const u = URL.createObjectURL(blob);
         const a = document.createElement('a');
@@ -184,6 +103,34 @@
             a.remove();
             URL.revokeObjectURL(u);
         }, 10000);
+    }
+
+    /**
+     * 通过直接 URL 触发浏览器下载
+     */
+    function saveDirectUrl(url, filename) {
+        if (!url || url.startsWith('#') || url.startsWith('javascript')) return;
+        if (typeof GM_download === 'function') {
+            try {
+                GM_download({
+                    url: url,
+                    name: filename,
+                    saveAs: false
+                });
+                return;
+            } catch (e) {}
+        }
+        const a = document.createElement('a');
+        a.href = url;
+        if (filename) a.download = filename;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        try {
+            a.click();
+        } catch (e) {}
+        setTimeout(() => a.remove(), 2000);
     }
 
     /**
@@ -362,7 +309,6 @@
                 msgId: msgId,
                 rawMsg: item.rawMsg || null,
                 element: item.element || null,
-                downloadBtn: item.downloadBtn || null,
                 blob: item.blob || null,
                 selected: true
             };
@@ -385,7 +331,6 @@
                 existing.element = item.element;
                 attachInlineTagToElement(existing);
             }
-            if (item.downloadBtn) existing.downloadBtn = item.downloadBtn;
             if (item.rawMsg && !existing.rawMsg) existing.rawMsg = item.rawMsg;
             if (item.mediaId && !existing.mediaId) existing.mediaId = item.mediaId;
         }
@@ -418,7 +363,7 @@
     }
 
     // ==========================================
-    // 2. 深度网络与静默 URL 拦截 (Silent Hooks)
+    // 2. 深度网络拦截 (Silent Hooks)
     // ==========================================
     function setupNetworkHooks() {
         const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
@@ -464,27 +409,18 @@
         win.open = function (url) {
             if (url && typeof url === 'string') {
                 extractAuthFromUrl(url);
-                State.capturedUrl = url;
-                if (State.isCapturingUrl) {
-                    console.log('[WeChat Downloader] Silently captured download URL:', url);
-                    return null;
-                }
             }
             return origOpenWin.apply(this, arguments);
         };
 
-        // 拦截 <a> 点击
+        // 拦截 <a> 点击提取凭证
         const origAnchorClick = win.HTMLAnchorElement.prototype.click;
         win.HTMLAnchorElement.prototype.click = function () {
             try {
                 const href = this.href || '';
-                if (href.startsWith('blob:')) {
-                    return origAnchorClick.apply(this, arguments);
-                }
-                const downloadName = this.getAttribute('download') || this.download;
                 if (href) {
                     extractAuthFromUrl(href);
-                    State.capturedUrl = href;
+                    const downloadName = this.getAttribute('download') || this.download;
                     if (downloadName) {
                         for (const item of State.items.values()) {
                             if (item.name === downloadName || downloadName.includes(item.name)) {
@@ -492,10 +428,6 @@
                                 if (State.blobs.has(href)) item.blob = State.blobs.get(href);
                             }
                         }
-                    }
-                    if (State.isCapturingUrl) {
-                        console.log('[WeChat Downloader] Silently captured anchor click URL:', href);
-                        return;
                     }
                 }
             } catch (e) {}
@@ -549,7 +481,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.2 engine ready.');
+        console.log('[WeChat Downloader] v2.8.3 ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -754,28 +686,8 @@
         return Math.abs(hash).toString(36);
     }
 
-    function findFileLiveElement(fileName) {
-        if (!fileName) return null;
-        const clean = cleanWechatFileName(fileName);
-        const chatBody = document.getElementById('chatBody') || document.querySelector('.chat-panel__body') || document.body;
-        const all = Array.from(chatBody.querySelectorAll('*'));
-        const matches = all.filter(el => {
-            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .wx-msg-download-tag, .chat-panel__input')) {
-                return false;
-            }
-            return el.textContent && el.textContent.includes(clean);
-        });
-
-        if (matches.length === 0) return null;
-
-        matches.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
-        const deepest = matches[0];
-        const card = deepest.closest('[class*="file"], [class*="msg"], [class*="bubble"], [class*="item"], [class*="card"], [class*="content"]') || deepest.parentElement || deepest;
-        return { deepest, card };
-    }
-
     /**
-     * 从 <img> 元素直接提取 Canvas 二进制 Blob (100% 兜底保证)
+     * 从 <img> 元素直接提取 Canvas 二进制 Blob
      */
     function getBlobFromImageElement(imgEl) {
         if (!imgEl) return Promise.resolve(null);
@@ -820,16 +732,19 @@
         tag.addEventListener('click', async (e) => {
             e.stopPropagation();
             e.preventDefault();
-            if (State.isCapturingUrl) return;
 
-            showToast(`⏳ 正在下载: ${item.name}`, 'info');
+            showToast(`⏳ 正在准备: ${item.name}`, 'info');
             try {
                 const blob = await fetchFileBlob(item);
-                await downloadBlobOrUrl(blob, item.name, item.url);
-                showToast(`✅ ${item.name} 下载成功`, 'success');
+                if (blob) {
+                    saveBlob(blob, item.name);
+                } else if (item.url && !item.url.startsWith('#')) {
+                    saveDirectUrl(item.url, item.name);
+                }
+                showToast(`✅ ${item.name} 已保存`, 'success');
             } catch (err) {
-                if (item.url && !item.url.startsWith('#') && !item.url.startsWith('javascript')) {
-                    await downloadBlobOrUrl(null, item.name, item.url);
+                if (item.url && !item.url.startsWith('#')) {
+                    saveDirectUrl(item.url, item.name);
                     showToast(`✅ ${item.name} 已触发直下`, 'success');
                 } else {
                     showToast(`❌ 下载失败: ${err.message}`, 'error');
@@ -913,34 +828,6 @@
                     element: img
                 });
                 scannedCount++;
-            }
-        });
-
-        // 3. 扫描背景图片容器 (仅在 chatBody 内部)
-        const allBgElements = chatBody.querySelectorAll('[style*="background-image"]');
-        allBgElements.forEach(el => {
-            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .wx-msg-download-tag')) return;
-            if (el.closest('[class*="file"], [class*="avatar"], [class*="head"]')) return;
-
-            const bg = el.style.backgroundImage || '';
-            if (bg.includes('url(')) {
-                const m = bg.match(/url\(['"]?(.*?)['"]?\)/);
-                if (m && m[1] && !m[1].includes('avatar') && !m[1].includes('qrcode') && !m[1].includes('emoji') && !m[1].includes('icon') && !m[1].includes('pdf')) {
-                    const rawSrc = m[1];
-                    const compData = extractComponentData(el);
-                    const msgId = compData?.MsgId || el.getAttribute('data-id') || extractMsgIdFromUrl(rawSrc);
-                    addItem({
-                        id: msgId ? `msg_${msgId}` : null,
-                        msgId: msgId,
-                        type: 'image',
-                        name: `image_${msgId || Date.now()}.jpg`,
-                        url: getHdMediaUrl(rawSrc, msgId),
-                        previewUrl: rawSrc,
-                        rawMsg: compData,
-                        element: el
-                    });
-                    scannedCount++;
-                }
             }
         });
 
@@ -1073,54 +960,8 @@
     }
 
     // ==========================================
-    // 5. 极速直下与后台数据流抓取引擎 (Background Fetch + Batch Save Engine)
+    // 5. 极速直下与后台数据流抓取引擎 (Safe Fetch & Direct Save Engine)
     // ==========================================
-    function triggerUserNativeClick(el) {
-        if (!el || State.isCapturingUrl) return false;
-        try {
-            const pureTargets = Array.from(el.querySelectorAll('a, button, [role="button"]')).filter(e => {
-                return !e.closest('.wx-input-operations-bar, .wx-msg-download-tag, #wx-toast-container');
-            });
-            const target = pureTargets[0] || (el.closest('.wx-msg-download-tag') ? null : el);
-            if (!target) return false;
-
-            if (typeof target.click === 'function') {
-                target.click();
-            } else {
-                target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
-            }
-            return true;
-        } catch (e) {
-            return false;
-        }
-    }
-
-    function captureDownloadUrlSilently(item) {
-        return new Promise((resolve) => {
-            if (State.isCapturingUrl) {
-                resolve(null);
-                return;
-            }
-
-            const live = findFileLiveElement(item.name);
-            const target = live?.card || live?.deepest || item.downloadBtn || item.element;
-            if (!target) {
-                resolve(null);
-                return;
-            }
-
-            State.capturedUrl = null;
-            State.isCapturingUrl = true;
-
-            triggerUserNativeClick(target);
-
-            setTimeout(() => {
-                State.isCapturingUrl = false;
-                resolve(State.capturedUrl);
-            }, 200);
-        });
-    }
-
     async function fetchBinaryBlobFromUrl(rawUrl, fileName) {
         if (!rawUrl || rawUrl.startsWith('#') || rawUrl.startsWith('javascript')) return null;
 
@@ -1131,10 +972,10 @@
 
         let absUrl = rawUrl.startsWith('/') ? (window.location.origin + rawUrl) : rawUrl;
 
-        // 1. 原生 Fetch (带 4 秒超时防护)
+        // 1. 原生 Fetch (3 秒超时，不阻塞)
         try {
             const controller = new AbortController();
-            const timeoutId = setTimeout(() => controller.abort(), 4000);
+            const timeoutId = setTimeout(() => controller.abort(), 3000);
 
             const res = await fetch(absUrl, { credentials: 'include', signal: controller.signal });
             clearTimeout(timeoutId);
@@ -1151,7 +992,7 @@
             }
         } catch (e) {}
 
-        // 2. GM_xmlhttpRequest (带 5 秒超时防护)
+        // 2. GM_xmlhttpRequest (4 秒超时)
         try {
             const gmBlob = await new Promise((resolve) => {
                 let resolved = false;
@@ -1160,13 +1001,13 @@
                         resolved = true;
                         resolve(null);
                     }
-                }, 5000);
+                }, 4000);
 
                 GM_xmlhttpRequest({
                     method: 'GET',
                     url: absUrl,
                     responseType: 'blob',
-                    timeout: 5000,
+                    timeout: 4000,
                     headers: {
                         'Referer': window.location.href,
                         'Accept': '*/*'
@@ -1221,7 +1062,7 @@
         if (item.rawMsg) {
             const built = buildFileDownloadUrl(item.rawMsg, item.mediaId || item.rawMsg.MediaId, item.name);
             if (built && !candidateUrls.includes(built)) {
-                candidateUrls.unshift(built); // 优先测试构建的完整 API 链接
+                candidateUrls.unshift(built);
                 item.url = built;
             }
         }
@@ -1243,11 +1084,6 @@
             }
         }
 
-        // 文件兜底：若有可用 URL，直接返回 null 让后续 GM_download 直下处理，避免抛错阻塞
-        if (item.url && !item.url.startsWith('#') && !item.url.startsWith('javascript')) {
-            return null;
-        }
-
         return null;
     }
 
@@ -1260,7 +1096,7 @@
     }
 
     /**
-     * 后台全量抓取到内存 + 完成后一次性批量落盘保存 (防卡顿版)
+     * 极速无卡顿批量下载调度器
      */
     async function startBatchDownload() {
         const selectedItems = getFilteredItems();
@@ -1273,17 +1109,14 @@
         const total = selectedItems.length;
         showInlineProgress(total);
 
-        // ===== 阶段 1：在后台将全部文件数据流并发读取到内存中 =====
+        // ===== 阶段 1：在后台尝试读取数据流 =====
         updateInlineProgress(0, total, '正在后台读取数据流...');
 
         let fetchedCount = 0;
         const fetchedList = await mapLimit(selectedItems, 2, async (item) => {
             if (!State.isDownloading) return null;
             try {
-                const blob = await Promise.race([
-                    fetchFileBlob(item),
-                    new Promise((resolve) => setTimeout(() => resolve(null), 5000))
-                ]);
+                const blob = await fetchFileBlob(item);
                 fetchedCount++;
                 updateInlineProgress(fetchedCount, total, `已就绪: ${item.name}`);
                 return { item, blob, name: item.name };
@@ -1299,7 +1132,7 @@
             return;
         }
 
-        // ===== 阶段 2：数据全部就绪后，一次性批量极速保存 =====
+        // ===== 阶段 2：数据就绪后，极速顺畅保存 =====
         const validItems = fetchedList.filter(x => x && (x.blob || (x.item && x.item.url && !x.item.url.startsWith('#'))));
         updateInlineProgress(total, total, `🚀 正在批量保存 (${validItems.length} 项)...`);
 
@@ -1309,9 +1142,13 @@
         for (let i = 0; i < validItems.length; i++) {
             const { item, blob, name } = validItems[i];
             try {
-                await downloadBlobOrUrl(blob, name, item.url);
+                if (blob) {
+                    saveBlob(blob, name);
+                } else if (item && item.url) {
+                    saveDirectUrl(item.url, name);
+                }
                 successCount++;
-                await sleep(150); // 微间隔确保浏览器平滑落盘
+                await sleep(200); // 间隔确保浏览器顺畅保存
             } catch (e) {
                 failCount++;
             }
