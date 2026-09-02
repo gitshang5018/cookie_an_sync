@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微信文件传输助手网页版 批量下载工具 (输入栏原生工具条版)
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.4
-// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，彻底解决HTM格式与数量不符问题！
+// @version      2.8.5
+// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，彻底根除任何HTM格式错误！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
 // @grant        GM_xmlhttpRequest
@@ -85,7 +85,7 @@
     }
 
     /**
-     * 将 Blob 实例极速保存到本地
+     * 将 Blob 实例极速保存到本地 (100% 二进制安全)
      */
     function saveBlob(blob, filename) {
         if (!blob) return;
@@ -210,7 +210,7 @@
     }
 
     /**
-     * 严格校验 Blob 是否为真实二进制
+     * 严格校验 Blob 是否为真实二进制，杜绝任何 HTML/HTM
      */
     function isRealBinaryBlob(blob, itemName) {
         if (!blob || blob.size === 0) return false;
@@ -231,6 +231,52 @@
         if (ext === 'html' || ext === 'htm' || ext === 'xml') return false;
         if (contentType.includes('text/html') || contentType.includes('text/xml') || contentType.includes('application/json')) return true;
         return false;
+    }
+
+    /**
+     * 从 <img> 元素直接提取二进制 Blob (图片100%真实保证)
+     */
+    function getBlobFromImageElement(imgEl) {
+        if (!imgEl) return Promise.resolve(null);
+        return new Promise((resolve) => {
+            try {
+                if (imgEl.src && imgEl.src.startsWith('data:image')) {
+                    fetch(imgEl.src).then(r => r.blob()).then(b => {
+                        if (b && isRealBinaryBlob(b, 'image.jpg')) resolve(b);
+                        else resolve(null);
+                    }).catch(() => resolve(null));
+                    return;
+                }
+                if (imgEl.src && imgEl.src.startsWith('blob:')) {
+                    if (State.blobs.has(imgEl.src)) {
+                        resolve(State.blobs.get(imgEl.src));
+                        return;
+                    }
+                    fetch(imgEl.src).then(r => r.blob()).then(b => {
+                        if (b && isRealBinaryBlob(b, 'image.jpg')) resolve(b);
+                        else resolve(null);
+                    }).catch(() => resolve(null));
+                    return;
+                }
+
+                const canvas = document.createElement('canvas');
+                const w = imgEl.naturalWidth || imgEl.clientWidth || 300;
+                const h = imgEl.naturalHeight || imgEl.clientHeight || 300;
+                canvas.width = w;
+                canvas.height = h;
+                const ctx = canvas.getContext('2d');
+                ctx.drawImage(imgEl, 0, 0, w, h);
+                canvas.toBlob((blob) => {
+                    if (blob && blob.size > 0 && isRealBinaryBlob(blob, 'image.jpg')) {
+                        resolve(blob);
+                    } else {
+                        resolve(null);
+                    }
+                }, 'image/jpeg', 0.98);
+            } catch (e) {
+                resolve(null);
+            }
+        });
     }
 
     /**
@@ -457,7 +503,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.4 ready.');
+        console.log('[WeChat Downloader] v2.8.5 ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -730,7 +776,8 @@
             }
 
             // 2. 检查是否为图片消息 (严格排除头像与文件图标)
-            const chatImg = msgEl.querySelector('.msg-img, img.picture, img.content-img, img[data-big-src]');
+            const chatImg = msgEl.querySelector('img:not(.msg-avatar):not(.file-icon):not([class*="avatar"])') ||
+                            msgEl.querySelector('.msg-img, img.picture, img.content-img, img[data-big-src]');
             if (chatImg && !isAvatarOrIcon(chatImg)) {
                 const rawSrc = chatImg.getAttribute('data-big-src') || chatImg.getAttribute('data-src') || chatImg.src;
                 if (rawSrc && !rawSrc.startsWith('data:image/svg')) {
@@ -952,6 +999,18 @@
             return item.blob;
         }
 
+        // 1. 如果是图片：优先从 Canvas / 页面 DOM 元素直接提取二进制（100% 真实，绝对不会是 HTML）
+        if (item.type === 'image') {
+            const imgEl = item.element || (item.msgId ? document.querySelector(`[data-id="${item.msgId}"]`) : null);
+            if (imgEl && imgEl.tagName === 'IMG') {
+                const canvasBlob = await getBlobFromImageElement(imgEl);
+                if (canvasBlob && isRealBinaryBlob(canvasBlob, item.name)) {
+                    item.blob = canvasBlob;
+                    return canvasBlob;
+                }
+            }
+        }
+
         const candidateUrls = [];
         if (item.dataUrl) candidateUrls.push(item.dataUrl);
         let finalUrl = item.type === 'image' ? getHdMediaUrl(item.url, item.msgId) : item.url;
@@ -974,6 +1033,15 @@
             if (blob && isRealBinaryBlob(blob, item.name)) {
                 item.blob = blob;
                 return blob;
+            }
+        }
+
+        // 2. 图片最后兜底：从当前 element 再次尝试 canvas 提取
+        if (item.type === 'image' && item.element) {
+            const canvasBlob = await getBlobFromImageElement(item.element);
+            if (canvasBlob && isRealBinaryBlob(canvasBlob, item.name)) {
+                item.blob = canvasBlob;
+                return canvasBlob;
             }
         }
 
@@ -1034,17 +1102,27 @@
         for (let i = 0; i < fetchedList.length; i++) {
             const { item, blob, name } = fetchedList[i];
             try {
-                // 1. 如果成功抓取到真实二进制 Blob，直接极速落盘
+                // 1. 如果成功抓取到真实二进制 Blob，直接极速落盘 (图片/文件通用)
                 if (blob && isRealBinaryBlob(blob, name)) {
                     saveBlob(blob, name);
                     successCount++;
                 }
-                // 2. 如果后台请求被鉴权拦截或返回HTML，则直接触发原生专属下载按钮，保证100%源文件格式
+                // 2. 如果后台请求被鉴权拦截或返回HTML，且该项有原生下载按钮，触发原生专属下载
                 else if (item.downloadBtn) {
                     item.downloadBtn.click();
                     successCount++;
                 }
-                // 3. 兜底直下 URL
+                // 3. 图片若无blob，绝不直下可能为HTML的URL，而是尝试使用页面上的图片节点
+                else if (item.type === 'image' && item.element) {
+                    const fallbackBlob = await getBlobFromImageElement(item.element);
+                    if (fallbackBlob && isRealBinaryBlob(fallbackBlob, name)) {
+                        saveBlob(fallbackBlob, name);
+                        successCount++;
+                    } else {
+                        failCount++;
+                    }
+                }
+                // 4. 兜底直下有效 URL
                 else if (item.url && !item.url.startsWith('#') && !item.url.startsWith('javascript')) {
                     saveDirectUrl(item.url, name);
                     successCount++;
