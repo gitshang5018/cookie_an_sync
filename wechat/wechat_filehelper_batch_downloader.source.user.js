@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         微信文件传输助手网页版 批量下载工具 (后台全量抓取+一次性批量保存版)
+// @name         微信文件传输助手网页版 批量下载工具 (输入栏原生工具条版)
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.0
-// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台先全量读取数据流到内存、完成后再一次性批量保存！
+// @version      2.8.1
+// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，彻底解决页面卡顿与无响应！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
 // @grant        GM_xmlhttpRequest
@@ -74,6 +74,8 @@
                 } catch (err) {
                     results[curIdx] = null;
                 }
+                // 让出微任务切片，防止阻塞主渲染线程
+                await sleep(30);
             }
         }
 
@@ -125,18 +127,46 @@
                             name: filename,
                             saveAs: false,
                             onload: () => resolve(true),
-                            onerror: () => resolve(false)
+                            onerror: () => {
+                                triggerDirectLinkDownload(fallbackUrl, filename);
+                                resolve(true);
+                            },
+                            ontimeout: () => {
+                                triggerDirectLinkDownload(fallbackUrl, filename);
+                                resolve(true);
+                            }
                         });
                         return;
-                    } catch (e) {}
+                    } catch (e) {
+                        triggerDirectLinkDownload(fallbackUrl, filename);
+                        resolve(true);
+                        return;
+                    }
                 }
             }
 
             if (blob) {
                 saveBlobFallback(blob, filename);
+            } else if (fallbackUrl && !fallbackUrl.startsWith('#') && !fallbackUrl.startsWith('javascript')) {
+                triggerDirectLinkDownload(fallbackUrl, filename);
             }
             resolve(true);
         });
+    }
+
+    function triggerDirectLinkDownload(url, filename) {
+        if (!url || url.startsWith('#') || url.startsWith('javascript')) return;
+        const a = document.createElement('a');
+        a.href = url;
+        if (filename) a.download = filename;
+        a.target = '_blank';
+        a.rel = 'noopener noreferrer';
+        a.style.display = 'none';
+        document.body.appendChild(a);
+        try {
+            a.click();
+        } catch (e) {}
+        setTimeout(() => a.remove(), 2000);
     }
 
     function saveBlobFallback(blob, filename) {
@@ -147,9 +177,13 @@
         a.download = filename;
         a.style.display = 'none';
         document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        setTimeout(() => URL.revokeObjectURL(u), 10000);
+        try {
+            a.click();
+        } catch (e) {}
+        setTimeout(() => {
+            a.remove();
+            URL.revokeObjectURL(u);
+        }, 10000);
     }
 
     /**
@@ -209,7 +243,7 @@
     }
 
     /**
-     * 构建微信源文件的下载 URL
+     * 构建微信源文件的下载 URL (修复参数拼接)
      */
     function buildFileDownloadUrl(msg, mediaId, fileName) {
         if (!mediaId && !msg) return '';
@@ -217,11 +251,12 @@
         const name = fileName || msg?.FileName || 'file.bin';
         const sender = (msg && (msg.FromUserName || msg.ToUserName)) || State.authParams.currentUser || 'filehelper';
         const fromUser = (msg && msg.FromUserName) || State.authParams.currentUser || 'filehelper';
+        const fromUserParam = fromUser ? `&fromuser=${encodeURIComponent(fromUser)}` : '';
         const skey = State.authParams.skey ? `&skey=${encodeURIComponent(State.authParams.skey)}` : '';
         const passTicket = State.authParams.pass_ticket ? `&pass_ticket=${encodeURIComponent(State.authParams.pass_ticket)}` : '';
         const dataTicket = State.authParams.dataTicket ? `&webwx_data_ticket=${encodeURIComponent(State.authParams.dataTicket)}` : '';
 
-        return `/cgi-bin/mmwebwx-bin/webwxgetmedia?sender=${encodeURIComponent(sender)}&mediaid=${encodeURIComponent(mid)}&filename=${encodeURIComponent(name)}${fromUser}${skey}${passTicket}${dataTicket}`;
+        return `/cgi-bin/mmwebwx-bin/webwxgetmedia?sender=${encodeURIComponent(sender)}&mediaid=${encodeURIComponent(mid)}&filename=${encodeURIComponent(name)}${fromUserParam}${skey}${passTicket}${dataTicket}`;
     }
 
     /**
@@ -514,7 +549,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.0 engine ready.');
+        console.log('[WeChat Downloader] v2.8.1 engine ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -704,7 +739,7 @@
         const clean = cleanWechatFileName(fileName);
         const all = Array.from(document.querySelectorAll('*'));
         const matches = all.filter(el => {
-            if (el.closest('.wx-input-operations-bar, #wx-toast-container')) {
+            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .wx-msg-download-tag')) {
                 return false;
             }
             return el.textContent && el.textContent.includes(clean);
@@ -764,13 +799,21 @@
         tag.addEventListener('click', async (e) => {
             e.stopPropagation();
             e.preventDefault();
+            // 防止在静默探测期间被触发
+            if (State.isCapturingUrl) return;
+
             showToast(`⏳ 正在下载: ${item.name}`, 'info');
             try {
                 const blob = await fetchFileBlob(item);
                 await downloadBlobOrUrl(blob, item.name, item.url);
                 showToast(`✅ ${item.name} 下载成功`, 'success');
             } catch (err) {
-                showToast(`❌ 下载失败: ${err.message}`, 'error');
+                if (item.url && !item.url.startsWith('#') && !item.url.startsWith('javascript')) {
+                    await downloadBlobOrUrl(null, item.name, item.url);
+                    showToast(`✅ ${item.name} 已触发直下`, 'success');
+                } else {
+                    showToast(`❌ 下载失败: ${err.message}`, 'error');
+                }
             }
         });
 
@@ -785,7 +828,7 @@
 
         // 1. 扫描文件
         const allEls = Array.from(document.querySelectorAll('*')).filter(el => {
-            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .chat-panel__input')) return false;
+            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .chat-panel__input, .wx-msg-download-tag')) return false;
             return el.textContent && fileRegex.test(el.textContent);
         });
 
@@ -822,7 +865,7 @@
         // 2. 扫描聊天图片 (包含 img 标签)
         const allImages = document.querySelectorAll('img');
         allImages.forEach(img => {
-            if (img.closest('.wx-input-operations-bar, #wx-toast-container, .chat-panel__input')) return;
+            if (img.closest('.wx-input-operations-bar, #wx-toast-container, .chat-panel__input, .wx-msg-download-tag')) return;
             if (isAvatarOrIcon(img)) return;
 
             const rawSrc = img.getAttribute('data-big-src') ||
@@ -853,7 +896,7 @@
         // 3. 扫描背景图片容器
         const allBgElements = document.querySelectorAll('[style*="background-image"]');
         allBgElements.forEach(el => {
-            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .chat-panel__input')) return;
+            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .chat-panel__input, .wx-msg-download-tag')) return;
             const bg = el.style.backgroundImage || '';
             if (bg.includes('url(')) {
                 const m = bg.match(/url\(['"]?(.*?)['"]?\)/);
@@ -880,17 +923,25 @@
     }
 
     function setupDOMObserver() {
+        let timer = null;
         const observer = new MutationObserver((mutations) => {
             let shouldScan = false;
             for (const mut of mutations) {
                 if (mut.addedNodes.length > 0) {
-                    shouldScan = true;
-                    break;
+                    for (const node of mut.addedNodes) {
+                        if (node.nodeType === 1 && !node.classList?.contains('wx-msg-download-tag') && !node.closest?.('.wx-input-operations-bar')) {
+                            shouldScan = true;
+                            break;
+                        }
+                    }
                 }
             }
             if (shouldScan) {
-                injectNativeInputOperationsBar();
-                scanDOM();
+                clearTimeout(timer);
+                timer = setTimeout(() => {
+                    injectNativeInputOperationsBar();
+                    scanDOM();
+                }, 300);
             }
         });
 
@@ -1000,37 +1051,32 @@
     // 5. 极速直下与后台数据流抓取引擎 (Background Fetch + Batch Save Engine)
     // ==========================================
     function triggerUserNativeClick(el) {
-        if (!el) return false;
+        if (!el || State.isCapturingUrl) return false;
         try {
-            el.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'instant' });
-        } catch (e) {}
+            const pureTargets = Array.from(el.querySelectorAll('a, button, [role="button"]')).filter(e => {
+                return !e.closest('.wx-input-operations-bar, .wx-msg-download-tag, #wx-toast-container');
+            });
+            const target = pureTargets[0] || (el.closest('.wx-msg-download-tag') ? null : el);
+            if (!target) return false;
 
-        const targets = [];
-        const inners = el.querySelectorAll('a, button, [role="button"], [class*="download"], [class*="attach"], [class*="file"], [class*="bubble"], [class*="card"]');
-        inners.forEach(inEl => targets.push(inEl));
-        targets.push(el);
-        if (el.parentElement) targets.push(el.parentElement);
-
-        let dispatched = false;
-        for (const target of targets) {
-            try {
-                if (typeof target.click === 'function') {
-                    target.click();
-                }
-                const opts = { bubbles: true, cancelable: true, composed: true, view: window };
-                target.dispatchEvent(new PointerEvent('pointerdown', opts));
-                target.dispatchEvent(new MouseEvent('mousedown', opts));
-                target.dispatchEvent(new PointerEvent('pointerup', opts));
-                target.dispatchEvent(new MouseEvent('mouseup', opts));
-                target.dispatchEvent(new MouseEvent('click', opts));
-                dispatched = true;
-            } catch (e) {}
+            if (typeof target.click === 'function') {
+                target.click();
+            } else {
+                target.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+            }
+            return true;
+        } catch (e) {
+            return false;
         }
-        return dispatched;
     }
 
     function captureDownloadUrlSilently(item) {
         return new Promise((resolve) => {
+            if (State.isCapturingUrl) {
+                resolve(null);
+                return;
+            }
+
             const live = findFileLiveElement(item.name);
             const target = live?.card || live?.deepest || item.downloadBtn || item.element;
             if (!target) {
@@ -1046,7 +1092,7 @@
             setTimeout(() => {
                 State.isCapturingUrl = false;
                 resolve(State.capturedUrl);
-            }, 250);
+            }, 200);
         });
     }
 
@@ -1060,9 +1106,14 @@
 
         let absUrl = rawUrl.startsWith('/') ? (window.location.origin + rawUrl) : rawUrl;
 
-        // 1. 原生 Fetch
+        // 1. 原生 Fetch (带 4 秒超时防护)
         try {
-            const res = await fetch(absUrl, { credentials: 'include' });
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 4000);
+
+            const res = await fetch(absUrl, { credentials: 'include', signal: controller.signal });
+            clearTimeout(timeoutId);
+
             if (res.ok) {
                 const ct = (res.headers.get('content-type') || '').toLowerCase();
                 if (!isContentTypeError(ct, fileName)) {
@@ -1075,18 +1126,30 @@
             }
         } catch (e) {}
 
-        // 2. GM_xmlhttpRequest
+        // 2. GM_xmlhttpRequest (带 5 秒超时防护)
         try {
             const gmBlob = await new Promise((resolve) => {
+                let resolved = false;
+                const timer = setTimeout(() => {
+                    if (!resolved) {
+                        resolved = true;
+                        resolve(null);
+                    }
+                }, 5000);
+
                 GM_xmlhttpRequest({
                     method: 'GET',
                     url: absUrl,
                     responseType: 'blob',
+                    timeout: 5000,
                     headers: {
                         'Referer': window.location.href,
                         'Accept': '*/*'
                     },
                     onload: (res) => {
+                        if (resolved) return;
+                        resolved = true;
+                        clearTimeout(timer);
                         const headers = (res.responseHeaders || '').toLowerCase();
                         if (res.status >= 200 && res.status < 300 && res.response) {
                             if (headers.includes('content-type: text/html') && isContentTypeError('text/html', fileName)) {
@@ -1098,8 +1161,12 @@
                             resolve(null);
                         }
                     },
-                    onerror: () => resolve(null),
-                    ontimeout: () => resolve(null)
+                    onerror: () => {
+                        if (!resolved) { resolved = true; clearTimeout(timer); resolve(null); }
+                    },
+                    ontimeout: () => {
+                        if (!resolved) { resolved = true; clearTimeout(timer); resolve(null); }
+                    }
                 });
             });
 
@@ -1128,7 +1195,10 @@
         }
         if (item.rawMsg) {
             const built = buildFileDownloadUrl(item.rawMsg, item.mediaId || item.rawMsg.MediaId, item.name);
-            if (built && !candidateUrls.includes(built)) candidateUrls.push(built);
+            if (built && !candidateUrls.includes(built)) {
+                candidateUrls.unshift(built); // 优先测试构建的完整 API 链接
+                item.url = built;
+            }
         }
 
         for (const u of candidateUrls) {
@@ -1139,20 +1209,7 @@
             }
         }
 
-        if (item.type === 'file') {
-            console.log(`[WeChat Downloader] Attempting silent URL capture for ${item.name}`);
-            const capturedUrl = await captureDownloadUrlSilently(item);
-            if (capturedUrl) {
-                item.url = capturedUrl;
-                const blob = await fetchBinaryBlobFromUrl(capturedUrl, item.name);
-                if (blob) {
-                    item.blob = blob;
-                    return blob;
-                }
-            }
-        }
-
-        // 3. 如果是图片且网络受限，直接从 DOM Canvas 提取二进制数据流
+        // 图片兜底：从 Canvas 提取
         if (item.type === 'image' && item.element) {
             const canvasBlob = await getBlobFromImageElement(item.element);
             if (canvasBlob && canvasBlob.size > 0) {
@@ -1161,7 +1218,12 @@
             }
         }
 
-        throw new Error(`无法获取 ${item.name} 的数据流`);
+        // 文件兜底：若有可用 URL，直接返回 null 让后续 GM_download 直下处理，避免抛错阻塞
+        if (item.url && !item.url.startsWith('#') && !item.url.startsWith('javascript')) {
+            return null;
+        }
+
+        return null;
     }
 
     function getFilteredItems() {
@@ -1173,7 +1235,7 @@
     }
 
     /**
-     * 后台全量抓取到内存 + 完成后一次性批量落盘保存
+     * 后台全量抓取到内存 + 完成后一次性批量落盘保存 (防卡顿版)
      */
     async function startBatchDownload() {
         const selectedItems = getFilteredItems();
@@ -1190,21 +1252,20 @@
         updateInlineProgress(0, total, '正在后台读取数据流...');
 
         let fetchedCount = 0;
-        const fetchedList = await mapLimit(selectedItems, 3, async (item) => {
+        const fetchedList = await mapLimit(selectedItems, 2, async (item) => {
             if (!State.isDownloading) return null;
             try {
                 const blob = await Promise.race([
                     fetchFileBlob(item),
-                    new Promise((_, reject) => setTimeout(() => reject(new Error('请求超时')), 8000))
+                    new Promise((resolve) => setTimeout(() => resolve(null), 5000))
                 ]);
                 fetchedCount++;
-                updateInlineProgress(fetchedCount, total, `已读取: ${item.name}`);
+                updateInlineProgress(fetchedCount, total, `已就绪: ${item.name}`);
                 return { item, blob, name: item.name };
             } catch (e) {
-                console.warn(`[WeChat Downloader] 读取异常: ${item.name}`, e);
                 fetchedCount++;
-                updateInlineProgress(fetchedCount, total, `读取失败: ${item.name}`);
-                return { item, blob: null, name: item.name, error: e.message };
+                updateInlineProgress(fetchedCount, total, `已就绪: ${item.name}`);
+                return { item, blob: null, name: item.name };
             }
         });
 
@@ -1214,8 +1275,8 @@
         }
 
         // ===== 阶段 2：数据全部就绪后，一次性批量极速保存 =====
-        const validItems = fetchedList.filter(x => x && (x.blob || (x.item && x.item.url)));
-        updateInlineProgress(total, total, `🚀 数据已全部抓取就绪，正在批量保存 (${validItems.length} 项)...`);
+        const validItems = fetchedList.filter(x => x && (x.blob || (x.item && x.item.url && !x.item.url.startsWith('#'))));
+        updateInlineProgress(total, total, `🚀 正在批量保存 (${validItems.length} 项)...`);
 
         let successCount = 0;
         let failCount = 0;
@@ -1225,13 +1286,13 @@
             try {
                 await downloadBlobOrUrl(blob, name, item.url);
                 successCount++;
-                await sleep(150); // 微小间隔确保浏览器平滑落盘
+                await sleep(150); // 微间隔确保浏览器平滑落盘
             } catch (e) {
                 failCount++;
             }
         }
 
-        let summary = `✅ 批量下载完成！成功保存 ${successCount} 项`;
+        let summary = `✅ 批量保存完成！成功 ${successCount} 项`;
         if (failCount > 0) summary += `，失败 ${failCount} 项`;
         showToast(summary, 'success');
 

@@ -2,8 +2,8 @@
 // @name         小红书 · 原图批量下载 (ZIP打包)
 // @namespace    xhs_zip_downloader
 // @version      7.0
-// @description  逆向原图：ci.xiaohongshu.com/{fileId}?imageView2/format/jpg 返回原始分辨率JPEG。支持HEIC原图、预览选择、ZIP打包、并发下载、失败重试、懒加载、Esc关闭。
-// @author       grok
+// @description  逆向原图返回原始分辨率JPEG。支持HEIC原图、预览选择、ZIP打包、并发下载、失败重试、懒加载、Esc关闭。
+// @author       by 柚子
 // @match        https://www.xiaohongshu.com/*
 // @match        https://www.rednote.com/*
 // @grant        GM_addStyle
