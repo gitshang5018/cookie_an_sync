@@ -1,7 +1,7 @@
 // ==UserScript==
-// @name         微信文件传输助手网页版 批量下载工具 (输入栏原生工具条版)
+// @name         微信文件传输助手网页版 批量下载工具
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.6
+// @version      2.8.7
 // @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，下载真实原图与原文件！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
@@ -23,12 +23,12 @@
     'use strict';
 
     // ==========================================
-    // 1. 全局状态 (State)
+    // 1. 全局状态与基础工具 (State & Core Utilities)
     // ==========================================
     const State = {
-        items: new Map(), // key: uniqueKey -> Item Object
-        blobs: new Map(), // key: url -> Blob instance
-        filterType: 'all', // 'all', 'image', 'file', 'video'
+        items: new Map(),       // uniqueKey -> Item Object
+        blobs: new Map(),       // url -> Blob instance
+        filterType: 'all',      // 'all' | 'image' | 'file' | 'video'
         searchQuery: '',
         isAutoScrolling: false,
         autoScrollTimer: null,
@@ -40,21 +40,101 @@
             wxuin: '',
             dataTicket: '',
             currentUser: ''
-        },
-        elementCounter: 0
+        }
     };
 
     /**
-     * 提取 URL 中的 MsgID
+     * 统一认证信息提取与更新引擎 (Unified Auth Engine)
      */
-    function extractMsgIdFromUrl(url) {
+    function updateAuth(source) {
+        if (!source) return;
+
+        // 1. 从 URL 字符串提取
+        if (typeof source === 'string') {
+            if (source.includes('=')) {
+                try {
+                    const u = new URL(source, window.location.origin);
+                    const getParam = (k) => u.searchParams.get(k);
+                    if (getParam('skey')) State.authParams.skey = getParam('skey');
+                    if (getParam('pass_ticket')) State.authParams.pass_ticket = getParam('pass_ticket');
+                    if (getParam('wxsid')) State.authParams.wxsid = getParam('wxsid');
+                    if (getParam('wxuin')) State.authParams.wxuin = getParam('wxuin');
+                    if (getParam('webwx_data_ticket')) State.authParams.dataTicket = getParam('webwx_data_ticket');
+                    if (getParam('fromuser')) State.authParams.currentUser = getParam('fromuser');
+                } catch (e) {
+                    const matchCookie = source.match(/webwx_data_ticket=([^;]+)/);
+                    if (matchCookie) State.authParams.dataTicket = matchCookie[1];
+                    const matchSkey = source.match(/skey=([^;]+)/);
+                    if (matchSkey && !State.authParams.skey) State.authParams.skey = matchSkey[1];
+                }
+            }
+            return;
+        }
+
+        // 2. 从 JSON 对象或 BaseRequest 提取
+        if (typeof source === 'object') {
+            if (source.BaseRequest) {
+                if (source.BaseRequest.Skey) State.authParams.skey = source.BaseRequest.Skey;
+                if (source.BaseRequest.Sid) State.authParams.wxsid = source.BaseRequest.Sid;
+                if (source.BaseRequest.Uin) State.authParams.wxuin = source.BaseRequest.Uin;
+            }
+            if (source.SKey || source.skey) State.authParams.skey = source.SKey || source.skey;
+            if (source.PassTicket || source.pass_ticket) State.authParams.pass_ticket = source.PassTicket || source.pass_ticket;
+            if (source.User?.UserName) State.authParams.currentUser = source.User.UserName;
+        }
+    }
+
+    function extractMsgId(url) {
         if (!url || typeof url !== 'string') return '';
-        const m = url.match(/[?&]MsgID=([^&#]+)/i) || url.match(/[?&]msgid=([^&#]+)/i) || url.match(/[?&]msg_id=([^&#]+)/i);
+        const m = url.match(/[?&](?:MsgID|msgid|msg_id)=([^&#]+)/i);
         return m ? m[1] : '';
     }
 
+    function hashString(str) {
+        if (!str) return Math.random().toString(36).slice(2);
+        let hash = 0;
+        for (let i = 0; i < str.length; i++) {
+            hash = (hash << 5) - hash + str.charCodeAt(i);
+            hash |= 0;
+        }
+        return Math.abs(hash).toString(36);
+    }
+
+    function cleanWechatFileName(rawText) {
+        if (!rawText) return '';
+        let name = rawText.trim()
+            .replace(/^.*?[的]?文件传输助手[:：\s]*/i, '')
+            .replace(/^(微信用户|我|好友|文件)[:：\s]*/i, '')
+            .replace(/^[\d]{1,2}:[\d]{2}[:\s]*/, '');
+
+        const match = name.match(/([\w\u4e00-\u9fa5\.\-\s_#\(\)\[\]（）]+\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|cdr|psd|ai|txt|csv|mp3|mp4|apk|iso|tar|gz|json|md|wps|et|dps))/i);
+        return match ? match[1].trim() : name.trim();
+    }
+
+    function sanitizeFilename(name) {
+        return (name || ('file_' + Date.now())).replace(/[\\/:*?"<>|]/g, '_').trim();
+    }
+
+    function formatBytes(bytes, decimals = 1) {
+        if (!bytes || bytes === 0) return '0 B';
+        const k = 1024;
+        const dm = decimals < 0 ? 0 : decimals;
+        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+    }
+
+    function formatCurrentTime() {
+        const d = new Date();
+        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
+
     /**
-     * 并发限制调度器 (Map Limit)
+     * 极速并发限制调度器
      */
     async function mapLimit(items, concurrency, fn) {
         const results = [];
@@ -64,10 +144,8 @@
         async function worker() {
             while (index < total) {
                 const curIdx = index++;
-                const item = items[curIdx];
                 try {
-                    const res = await fn(item, curIdx);
-                    results[curIdx] = res;
+                    results[curIdx] = await fn(items[curIdx], curIdx);
                 } catch (err) {
                     results[curIdx] = null;
                 }
@@ -77,15 +155,13 @@
 
         const workers = [];
         const numWorkers = Math.min(concurrency, total);
-        for (let i = 0; i < numWorkers; i++) {
-            workers.push(worker());
-        }
+        for (let i = 0; i < numWorkers; i++) workers.push(worker());
         await Promise.all(workers);
         return results;
     }
 
     /**
-     * 将 Blob 实例极速保存到本地 (100% 二进制安全)
+     * 二进制 Blob 极速落盘保存
      */
     function saveBlob(blob, filename) {
         if (!blob) return;
@@ -95,9 +171,7 @@
         a.download = filename;
         a.style.display = 'none';
         document.body.appendChild(a);
-        try {
-            a.click();
-        } catch (e) {}
+        try { a.click(); } catch (e) { }
         setTimeout(() => {
             a.remove();
             URL.revokeObjectURL(u);
@@ -105,19 +179,15 @@
     }
 
     /**
-     * 通过直接 URL 触发浏览器下载
+     * 直接 URL 触发下载 (支持 GM_download 优先)
      */
     function saveDirectUrl(url, filename) {
         if (!url || url.startsWith('#') || url.startsWith('javascript')) return;
         if (typeof GM_download === 'function') {
             try {
-                GM_download({
-                    url: url,
-                    name: filename,
-                    saveAs: false
-                });
+                GM_download({ url, name: filename, saveAs: false });
                 return;
-            } catch (e) {}
+            } catch (e) { }
         }
         const a = document.createElement('a');
         a.href = url;
@@ -126,14 +196,12 @@
         a.rel = 'noopener noreferrer';
         a.style.display = 'none';
         document.body.appendChild(a);
-        try {
-            a.click();
-        } catch (e) {}
+        try { a.click(); } catch (e) { }
         setTimeout(() => a.remove(), 2000);
     }
 
     /**
-     * 高清原图 URL 转换引擎 (将 type=slave 彻底替换为 type=big)
+     * 高清原图 URL 转换引擎 (type=slave -> type=big)
      */
     function getHdMediaUrl(url, msgId) {
         if (!url || typeof url !== 'string') return url;
@@ -155,62 +223,38 @@
         }
 
         if (hdUrl.includes('qpic.cn') || hdUrl.includes('qlogo.cn') || hdUrl.includes('weixin.qq.com')) {
-            hdUrl = hdUrl.replace(/\/640(\?|$|\/)/, '/0$1')
-                         .replace(/\/132(\?|$|\/)/, '/0$1')
-                         .replace(/\/300(\?|$|\/)/, '/0$1')
-                         .replace(/\/96(\?|$|\/)/, '/0$1');
+            hdUrl = hdUrl.replace(/\/(?:640|132|300|96)(\?|$|\/)/g, '/0$1');
         }
 
-        hdUrl = hdUrl.replace(/_thumb\./, '.')
-                     .replace(/_preview\./, '.')
-                     .replace(/([?&])thumb=[^&]*&?/, '$1')
-                     .replace(/([?&])type=preview&?/, '$1')
-                     .replace(/[?&]$/, '');
-
-        return hdUrl;
+        return hdUrl.replace(/_(?:thumb|preview)\./g, '.')
+            .replace(/([?&])(?:thumb|type=preview)[^&]*&?/g, '$1')
+            .replace(/[?&]$/, '');
     }
 
     /**
-     * 智能净化微信文件名
-     */
-    function cleanWechatFileName(rawText) {
-        if (!rawText) return '';
-        let name = rawText.trim();
-
-        name = name.replace(/^.*?[的]?文件传输助手[:：\s]*/i, '');
-        name = name.replace(/^(微信用户|我|好友|文件)[:：\s]*/i, '');
-        name = name.replace(/^[\d]{1,2}:[\d]{2}[:\s]*/, '');
-
-        const match = name.match(/([\w\u4e00-\u9fa5\.\-\s_#\(\)\[\]（）]+\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|cdr|psd|ai|txt|csv|mp3|mp4|apk|iso|tar|gz|json|md|wps|et|dps))/i);
-        if (match) {
-            return match[1].trim();
-        }
-        return name.trim();
-    }
-
-    /**
-     * 构建微信源文件的下载 URL
+     * 构建微信源文件官方下载 URL
      */
     function buildFileDownloadUrl(msg, mediaId, fileName) {
         const mid = mediaId || msg?.MediaId || msg?.mediaId || msg?.attachId || '';
         const name = fileName || msg?.FileName || msg?.title || 'file.bin';
         const sender = msg?.FromUserName || State.authParams.currentUser || 'filehelper';
         const fromUser = msg?.FromUserName || State.authParams.currentUser || 'filehelper';
-        
-        let params = [];
-        params.push(`sender=${encodeURIComponent(sender)}`);
-        if (mid) params.push(`mediaid=${encodeURIComponent(mid)}`);
-        params.push(`filename=${encodeURIComponent(name)}`);
-        if (fromUser) params.push(`fromuser=${encodeURIComponent(fromUser)}`);
-        if (State.authParams.skey) params.push(`skey=${encodeURIComponent(State.authParams.skey)}`);
-        if (State.authParams.pass_ticket) params.push(`pass_ticket=${encodeURIComponent(State.authParams.pass_ticket)}`);
-        if (State.authParams.dataTicket) params.push(`webwx_data_ticket=${encodeURIComponent(State.authParams.dataTicket)}`);
+
+        const params = [
+            `sender=${encodeURIComponent(sender)}`,
+            mid ? `mediaid=${encodeURIComponent(mid)}` : '',
+            `filename=${encodeURIComponent(name)}`,
+            fromUser ? `fromuser=${encodeURIComponent(fromUser)}` : '',
+            State.authParams.skey ? `skey=${encodeURIComponent(State.authParams.skey)}` : '',
+            State.authParams.pass_ticket ? `pass_ticket=${encodeURIComponent(State.authParams.pass_ticket)}` : '',
+            State.authParams.dataTicket ? `webwx_data_ticket=${encodeURIComponent(State.authParams.dataTicket)}` : ''
+        ].filter(Boolean);
 
         return `/cgi-bin/mmwebwx-bin/webwxgetmedia?` + params.join('&');
     }
 
     /**
-     * 严格校验 Blob 是否为真实二进制，杜绝任何 HTML/HTM
+     * 严格校验 Blob 是否为真实二进制，杜绝任何 HTML/HTM 错误
      */
     function isRealBinaryBlob(blob, itemName) {
         if (!blob || blob.size === 0) return false;
@@ -229,12 +273,11 @@
         if (!contentType) return false;
         const ext = (fileName || '').split('.').pop().toLowerCase();
         if (ext === 'html' || ext === 'htm' || ext === 'xml') return false;
-        if (contentType.includes('text/html') || contentType.includes('text/xml') || contentType.includes('application/json')) return true;
-        return false;
+        return contentType.includes('text/html') || contentType.includes('text/xml') || contentType.includes('application/json');
     }
 
     /**
-     * 从 <img> 元素提取二进制 Blob (仅作为无原图时的最终兜底)
+     * 从 <img> 元素提取二进制 Blob (仅作为无原图且无下载按钮时的最终兜底)
      */
     function getBlobFromImageElement(imgEl) {
         if (!imgEl) return Promise.resolve(null);
@@ -242,8 +285,7 @@
             try {
                 if (imgEl.src && imgEl.src.startsWith('data:image')) {
                     fetch(imgEl.src).then(r => r.blob()).then(b => {
-                        if (b && isRealBinaryBlob(b, 'image.jpg')) resolve(b);
-                        else resolve(null);
+                        resolve((b && isRealBinaryBlob(b, 'image.jpg')) ? b : null);
                     }).catch(() => resolve(null));
                     return;
                 }
@@ -253,8 +295,7 @@
                         return;
                     }
                     fetch(imgEl.src).then(r => r.blob()).then(b => {
-                        if (b && isRealBinaryBlob(b, 'image.jpg')) resolve(b);
-                        else resolve(null);
+                        resolve((b && isRealBinaryBlob(b, 'image.jpg')) ? b : null);
                     }).catch(() => resolve(null));
                     return;
                 }
@@ -267,11 +308,7 @@
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(imgEl, 0, 0, w, h);
                 canvas.toBlob((blob) => {
-                    if (blob && blob.size > 0 && isRealBinaryBlob(blob, 'image.jpg')) {
-                        resolve(blob);
-                    } else {
-                        resolve(null);
-                    }
+                    resolve((blob && blob.size > 0 && isRealBinaryBlob(blob, 'image.jpg')) ? blob : null);
                 }, 'image/jpeg', 0.98);
             } catch (e) {
                 resolve(null);
@@ -279,20 +316,19 @@
         });
     }
 
-    /**
-     * 智能去重与数据项管理
-     */
+    // ==========================================
+    // 2. 资源仓库与去重管理 (Item Registry)
+    // ==========================================
     function addItem(item) {
         if (!item || (!item.url && !item.name && !item.element && !item.downloadBtn)) return;
 
         const isImage = item.type === 'image';
         const isFile = item.type === 'file';
-
-        const rawName = item.name || generateDefaultName(item.type);
+        const rawName = item.name || (isImage ? 'image.jpg' : 'file.bin');
         const cleanName = isFile ? cleanWechatFileName(rawName) : sanitizeFilename(rawName);
 
         let rawUrl = item.url || '';
-        const msgId = item.rawMsg?.MsgId || item.msgId || extractMsgIdFromUrl(rawUrl);
+        const msgId = item.rawMsg?.MsgId || item.msgId || extractMsgId(rawUrl);
         let hdUrl = isImage ? getHdMediaUrl(rawUrl, msgId) : rawUrl;
         let previewUrl = item.previewUrl || rawUrl || hdUrl;
 
@@ -301,15 +337,7 @@
             if (builtUrl) hdUrl = builtUrl;
         }
 
-        let key = null;
-
-        if (isFile) {
-            key = `file_${cleanName.toLowerCase()}`;
-        } else if (isImage) {
-            key = msgId ? `image_msg_${msgId}` : `image_${hashString(hdUrl || previewUrl)}`;
-        } else {
-            key = `video_${msgId || Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
-        }
+        let key = isFile ? `file_${cleanName.toLowerCase()}` : (isImage ? (msgId ? `image_msg_${msgId}` : `image_${hashString(hdUrl || previewUrl)}`) : `video_${msgId || Date.now()}`);
 
         if (!State.items.has(key)) {
             let finalName = cleanName;
@@ -359,58 +387,23 @@
         }
     }
 
-    function sanitizeFilename(name) {
-        if (!name) return 'file_' + Date.now();
-        return name.replace(/[\\/:*?"<>|]/g, '_').trim();
-    }
-
-    function generateDefaultName(type) {
-        const time = new Date().toISOString().replace(/[-:T.]/g, '').slice(0, 14);
-        if (type === 'image') return `image_${time}.jpg`;
-        if (type === 'video') return `video_${time}.mp4`;
-        return `file_${time}.bin`;
-    }
-
-    function formatBytes(bytes, decimals = 1) {
-        if (!bytes || bytes === 0) return '0 B';
-        const k = 1024;
-        const dm = decimals < 0 ? 0 : decimals;
-        const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
-    }
-
-    function formatCurrentTime() {
-        const d = new Date();
-        return `${d.getHours().toString().padStart(2, '0')}:${d.getMinutes().toString().padStart(2, '0')}`;
+    function getFilteredItems() {
+        return Array.from(State.items.values()).filter(item => {
+            const matchesType = (State.filterType === 'all') || (item.type === State.filterType);
+            const matchesQuery = !State.searchQuery || item.name.toLowerCase().includes(State.searchQuery);
+            return matchesType && matchesQuery;
+        });
     }
 
     // ==========================================
-    // 2. 深度网络拦截 (Silent Hooks)
+    // 3. 网络与全局数据拦截 (Silent Network Hooks)
     // ==========================================
     function setupNetworkHooks() {
         const win = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
-        function extractAuthFromUrl(url) {
-            if (!url) return;
-            try {
-                const u = new URL(url, win.location.origin);
-                if (u.searchParams.get('skey')) State.authParams.skey = u.searchParams.get('skey');
-                if (u.searchParams.get('pass_ticket')) State.authParams.pass_ticket = u.searchParams.get('pass_ticket');
-                if (u.searchParams.get('wxsid')) State.authParams.wxsid = u.searchParams.get('wxsid');
-                if (u.searchParams.get('wxuin')) State.authParams.wxuin = u.searchParams.get('wxuin');
-                if (u.searchParams.get('webwx_data_ticket')) State.authParams.dataTicket = u.searchParams.get('webwx_data_ticket');
-                if (u.searchParams.get('fromuser')) State.authParams.currentUser = u.searchParams.get('fromuser');
-            } catch (e) {}
-        }
-
-        extractAuthFromUrl(win.location.href);
-        try {
-            const match = document.cookie.match(/webwx_data_ticket=([^;]+)/);
-            if (match) State.authParams.dataTicket = match[1];
-            const skeyMatch = document.cookie.match(/skey=([^;]+)/);
-            if (skeyMatch && !State.authParams.skey) State.authParams.skey = skeyMatch[1];
-        } catch (e) {}
+        // 初始化从页面 URL 及 Cookie 截取认证
+        updateAuth(win.location.href);
+        updateAuth(document.cookie);
 
         const origCreateObjectURL = win.URL.createObjectURL;
         win.URL.createObjectURL = function (obj) {
@@ -430,9 +423,7 @@
 
         const origOpenWin = win.open;
         win.open = function (url) {
-            if (url && typeof url === 'string') {
-                extractAuthFromUrl(url);
-            }
+            if (url && typeof url === 'string') updateAuth(url);
             return origOpenWin.apply(this, arguments);
         };
 
@@ -441,7 +432,7 @@
             try {
                 const href = this.href || '';
                 if (href) {
-                    extractAuthFromUrl(href);
+                    updateAuth(href);
                     const downloadName = this.getAttribute('download') || this.download;
                     if (downloadName) {
                         for (const item of State.items.values()) {
@@ -452,7 +443,7 @@
                         }
                     }
                 }
-            } catch (e) {}
+            } catch (e) { }
             return origAnchorClick.apply(this, arguments);
         };
 
@@ -461,21 +452,13 @@
 
         win.XMLHttpRequest.prototype.open = function (method, url) {
             this._reqUrl = url;
-            this._reqMethod = method;
-            extractAuthFromUrl(url);
+            updateAuth(url);
             return origOpen.apply(this, arguments);
         };
 
         win.XMLHttpRequest.prototype.send = function (body) {
             if (typeof body === 'string' && body.includes('BaseRequest')) {
-                try {
-                    const parsed = JSON.parse(body);
-                    if (parsed.BaseRequest) {
-                        if (parsed.BaseRequest.Skey) State.authParams.skey = parsed.BaseRequest.Skey;
-                        if (parsed.BaseRequest.Sid) State.authParams.wxsid = parsed.BaseRequest.Sid;
-                        if (parsed.BaseRequest.Uin) State.authParams.wxuin = parsed.BaseRequest.Uin;
-                    }
-                } catch (e) {}
+                try { updateAuth(JSON.parse(body)); } catch (e) { }
             }
 
             this.addEventListener('load', function () {
@@ -484,45 +467,38 @@
                     if (this.responseType === '' || this.responseType === 'text') {
                         parseApiResponse(url, this.responseText);
                     }
-                } catch (e) {}
+                } catch (e) { }
             });
             return origSend.apply(this, arguments);
         };
 
         const origFetch = win.fetch;
         win.fetch = async function (...args) {
-            const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url ? args[0].url : '');
-            extractAuthFromUrl(url);
+            const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url || '');
+            updateAuth(url);
             const response = await origFetch.apply(this, args);
             try {
-                const clone = response.clone();
-                clone.text().then(text => {
-                    parseApiResponse(url, text);
-                }).catch(() => {});
-            } catch (e) {}
+                response.clone().text().then(text => parseApiResponse(url, text)).catch(() => { });
+            } catch (e) { }
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.6 ready.');
+        console.log('[WeChat Downloader] v2.8.7 engine ready.');
     }
 
     function parseApiResponse(url, responseText) {
         if (!responseText || typeof responseText !== 'string') return;
-
         if (responseText.trim().startsWith('{') || responseText.trim().startsWith('[')) {
             try {
                 const data = JSON.parse(responseText);
                 extractMessagesFromObject(data);
-            } catch (e) {}
+            } catch (e) { }
         }
     }
 
     function extractMessagesFromObject(obj) {
         if (!obj || typeof obj !== 'object') return;
-
-        if (obj.SKey || obj.skey) State.authParams.skey = obj.SKey || obj.skey;
-        if (obj.PassTicket || obj.pass_ticket) State.authParams.pass_ticket = obj.PassTicket || obj.pass_ticket;
-        if (obj.User?.UserName) State.authParams.currentUser = obj.User.UserName;
+        updateAuth(obj);
 
         const msgList = obj.AddMsgList || obj.msg_list || obj.messages || obj.data?.list || (Array.isArray(obj) ? obj : null);
         if (Array.isArray(msgList)) {
@@ -558,19 +534,18 @@
         }
         // 2. 视频消息
         else if (msgType === 43 || msgType === 62 || msgType === 'VIDEO') {
-            let videoUrl = msg.url || msg.download_url || `/cgi-bin/mmwebwx-bin/webwxgetvideo?msgid=${msgId}${skey}${passTicket}`;
             addItem({
                 id: `video_${msgId}`,
                 msgId: msgId,
                 type: 'video',
                 name: `video_${msgId}.mp4`,
-                url: videoUrl,
+                url: msg.url || msg.download_url || `/cgi-bin/mmwebwx-bin/webwxgetvideo?msgid=${msgId}${skey}${passTicket}`,
                 previewUrl: msg.thumb_url || '',
                 size: msg.FileSize || msg.file_size || 0,
                 rawMsg: msg
             });
         }
-        // 3. 应用消息/文件消息
+        // 3. 应用/文件消息
         else if (msgType === 49 || msgType === 'FILE' || (content && content.includes('<appmsg>'))) {
             const titleMatch = content.match(/<title>(.*?)<\/title>/);
             const totalLenMatch = content.match(/<totallen>(.*?)<\/totallen>/);
@@ -614,47 +589,26 @@
     }
 
     // ==========================================
-    // 3. 精准 DOM 扫描 (Exact Message-Scoped Scanner)
+    // 4. 精准 DOM 扫描与气泡标签 (Exact Message-Scoped Scanner)
     // ==========================================
     function extractMsgFromElement(el) {
         if (!el) return null;
-        const msgItem = el.closest('.msg-item') || el.closest('.msg-list__item') || el.closest('li') || el;
-        
-        let curr = msgItem;
-        while (curr && curr !== document.body) {
+        let curr = el.closest('.msg-item') || el;
+        let depth = 0;
+        while (curr && curr !== document.body && depth < 4) {
             if (curr.__vueParentComponent) {
                 const comp = curr.__vueParentComponent;
                 const item = comp.props?.item || comp.props?.msg || comp.setupState?.item || comp.setupState?.msg || comp.data?.item;
                 if (item) return item;
             }
-            if (curr.__vnode) {
-                const vn = curr.__vnode;
-                const item = vn.props?.item || vn.props?.msg || vn.memoizedProps?.item;
-                if (item && typeof item === 'object') return item;
-            }
-            if (curr.__vue__) {
-                const v = curr.__vue__;
-                const item = v.item || v.msg || v.data?.item;
-                if (item) return item;
-            }
+            if (curr.__vnode?.props?.item) return curr.__vnode.props.item;
+            if (curr.__vue__?.item) return curr.__vue__.item;
             curr = curr.parentElement;
+            depth++;
         }
         return null;
     }
 
-    function hashString(str) {
-        if (!str) return Math.random().toString(36).slice(2);
-        let hash = 0;
-        for (let i = 0; i < str.length; i++) {
-            hash = (hash << 5) - hash + str.charCodeAt(i);
-            hash |= 0;
-        }
-        return Math.abs(hash).toString(36);
-    }
-
-    /**
-     * 将下载按钮直接注入到原生聊天气泡卡片下方
-     */
     function attachInlineTagToElement(item) {
         if (!item.element) return;
         const parentCard = item.element.querySelector('.msg-file__content') || item.element.querySelector('.msg-image') || item.element.querySelector('.msg-item__content') || item.element;
@@ -698,9 +652,6 @@
         parentCard.appendChild(tag);
     }
 
-    /**
-     * 针对每条消息精确解析，保证数量 100% 对应且图片取高清原图
-     */
     function scanDOM() {
         injectNativeInputOperationsBar();
 
@@ -714,7 +665,7 @@
             // 1. 检查是否为文件消息 (.msg-file)
             const fileTitleEl = msgEl.querySelector('.msg-file__title');
             const fileCard = msgEl.querySelector('.msg-file');
-            
+
             if (fileTitleEl || fileCard) {
                 const rawTitle = fileTitleEl ? (fileTitleEl.childNodes[0]?.textContent || fileTitleEl.textContent) : (fileCard.textContent || '');
                 const cleanName = cleanWechatFileName(rawTitle);
@@ -741,7 +692,7 @@
                     });
                     scannedCount++;
                 }
-                return; // 文件消息处理完毕
+                return;
             }
 
             // 2. 检查是否为图片消息 (.msg-image)
@@ -750,10 +701,10 @@
                 const chatImg = imageCard.querySelector('img');
                 const dlBtn = imageCard.querySelector('.icon__download') || msgEl.querySelector('.icon__download');
                 const rawSrc = chatImg ? (chatImg.getAttribute('data-big-src') || chatImg.getAttribute('data-src') || chatImg.src) : '';
-                
+
                 if (rawSrc) {
                     const compData = extractMsgFromElement(msgEl);
-                    const msgId = compData?.MsgId || extractMsgIdFromUrl(rawSrc);
+                    const msgId = compData?.MsgId || extractMsgId(rawSrc);
                     const hdUrl = getHdMediaUrl(rawSrc, msgId);
 
                     addItem({
@@ -769,7 +720,7 @@
                     });
                     scannedCount++;
                 }
-                return; // 图片消息处理完毕
+                return;
             }
 
             // 3. 检查是否为视频消息
@@ -820,29 +771,19 @@
             }
         });
 
-        observer.observe(document.documentElement, {
-            childList: true,
-            subtree: true
-        });
+        observer.observe(document.documentElement, { childList: true, subtree: true });
     }
 
     // ==========================================
-    // 4. 自动滚动加载历史记录 (Auto-Scroller)
+    // 5. 自动滚动加载历史记录 (Auto-Scroller)
     // ==========================================
     function findScrollContainer() {
         const chatBody = document.getElementById('chatBody') || document.querySelector('.chat-panel__body');
-        if (chatBody && chatBody.scrollHeight > chatBody.clientHeight) {
-            return chatBody;
-        }
-        return document.scrollingElement || document.documentElement;
+        return (chatBody && chatBody.scrollHeight > chatBody.clientHeight) ? chatBody : (document.scrollingElement || document.documentElement);
     }
 
     function toggleAutoScroll() {
-        if (State.isAutoScrolling) {
-            stopAutoScroll();
-        } else {
-            startAutoScroll();
-        }
+        State.isAutoScrolling ? stopAutoScroll() : startAutoScroll();
     }
 
     function startAutoScroll() {
@@ -876,7 +817,6 @@
             lastHeight = currentScrollHeight;
             container.scrollTop = 0;
             container.dispatchEvent(new Event('scroll', { bubbles: true }));
-
         }, 1200);
     }
 
@@ -905,7 +845,7 @@
     }
 
     // ==========================================
-    // 5. 极速直下与后台数据流抓取引擎 (Safe Fetch & HD Image Engine)
+    // 6. 后台安全抓取与极速批量下载 (Fetch & Batch Engine)
     // ==========================================
     async function fetchBinaryBlobFromUrl(rawUrl, fileName) {
         if (!rawUrl || rawUrl.startsWith('#') || rawUrl.startsWith('javascript')) return null;
@@ -915,13 +855,12 @@
             if (isRealBinaryBlob(b, fileName)) return b;
         }
 
-        let absUrl = rawUrl.startsWith('/') ? (window.location.origin + rawUrl) : rawUrl;
+        const absUrl = rawUrl.startsWith('/') ? (window.location.origin + rawUrl) : rawUrl;
 
         // 1. 原生 Fetch
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 4000);
-
             const res = await fetch(absUrl, { credentials: 'include', signal: controller.signal });
             clearTimeout(timeoutId);
 
@@ -935,17 +874,14 @@
                     }
                 }
             }
-        } catch (e) {}
+        } catch (e) { }
 
-        // 2. GM_xmlhttpRequest
+        // 2. GM_xmlhttpRequest (跨域与 Referer 增强)
         try {
             const gmBlob = await new Promise((resolve) => {
                 let resolved = false;
                 const timer = setTimeout(() => {
-                    if (!resolved) {
-                        resolved = true;
-                        resolve(null);
-                    }
+                    if (!resolved) { resolved = true; resolve(null); }
                 }, 5000);
 
                 GM_xmlhttpRequest({
@@ -953,10 +889,7 @@
                     url: absUrl,
                     responseType: 'blob',
                     timeout: 5000,
-                    headers: {
-                        'Referer': window.location.href,
-                        'Accept': '*/*'
-                    },
+                    headers: { 'Referer': window.location.href, 'Accept': '*/*' },
                     onload: (res) => {
                         if (resolved) return;
                         resolved = true;
@@ -972,12 +905,8 @@
                             resolve(null);
                         }
                     },
-                    onerror: () => {
-                        if (!resolved) { resolved = true; clearTimeout(timer); resolve(null); }
-                    },
-                    ontimeout: () => {
-                        if (!resolved) { resolved = true; clearTimeout(timer); resolve(null); }
-                    }
+                    onerror: () => { if (!resolved) { resolved = true; clearTimeout(timer); resolve(null); } },
+                    ontimeout: () => { if (!resolved) { resolved = true; clearTimeout(timer); resolve(null); } }
                 });
             });
 
@@ -985,7 +914,7 @@
                 State.blobs.set(rawUrl, gmBlob);
                 return gmBlob;
             }
-        } catch (e) {}
+        } catch (e) { }
 
         return null;
     }
@@ -996,7 +925,7 @@
         }
 
         const candidateUrls = [];
-        let finalUrl = item.type === 'image' ? getHdMediaUrl(item.url, item.msgId) : item.url;
+        const finalUrl = item.type === 'image' ? getHdMediaUrl(item.url, item.msgId) : item.url;
         if (finalUrl && !finalUrl.startsWith('#') && !finalUrl.startsWith('javascript')) {
             candidateUrls.push(finalUrl);
         }
@@ -1012,7 +941,7 @@
             }
         }
 
-        // 1. 尝试从高清网络接口抓取真实大图/原文件
+        // 1. 优先尝试从高清网络接口抓取真实大图/原文件
         for (const u of candidateUrls) {
             const blob = await fetchBinaryBlobFromUrl(u, item.name);
             if (blob && isRealBinaryBlob(blob, item.name)) {
@@ -1021,7 +950,7 @@
             }
         }
 
-        // 2. 仅当图片无法通过高清接口获取且无原生按钮时，才使用页面 DOM 提取作为最后兜底
+        // 2. 仅当图片无法通过网络获取且无原生绿色下载按钮时，使用 Canvas 提取作为兜底
         if (item.type === 'image' && !item.downloadBtn) {
             const imgEl = item.element?.tagName === 'IMG' ? item.element : item.element?.querySelector('img');
             if (imgEl) {
@@ -1034,14 +963,6 @@
         }
 
         return null;
-    }
-
-    function getFilteredItems() {
-        return Array.from(State.items.values()).filter(item => {
-            const matchesType = (State.filterType === 'all') || (item.type === State.filterType);
-            const matchesQuery = !State.searchQuery || item.name.toLowerCase().includes(State.searchQuery);
-            return matchesType && matchesQuery;
-        });
     }
 
     /**
@@ -1058,7 +979,7 @@
         const total = selectedItems.length;
         showInlineProgress(total);
 
-        // ===== 阶段 1：在后台尝试读取真实二进制数据流 (支持高清大图与原文件) =====
+        // ===== 阶段 1：在后台尝试读取真实二进制数据流 =====
         updateInlineProgress(0, total, '正在准备高清数据流...');
 
         let fetchedCount = 0;
@@ -1100,7 +1021,7 @@
                     item.downloadBtn.click();
                     successCount++;
                 }
-                // 3. 兜底直下有效 URL (非HTML页面)
+                // 3. 兜底直下有效 URL (非 HTML 页面)
                 else if (item.url && !item.url.startsWith('#') && !item.url.startsWith('javascript')) {
                     saveDirectUrl(item.url, name);
                     successCount++;
@@ -1121,21 +1042,15 @@
         setTimeout(() => hideInlineProgress(), 1200);
     }
 
-    function sleep(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
-
     // ==========================================
-    // 6. 输入栏文件夹图标同行嵌入样式与DOM (Input Bar Integration)
+    // 7. 输入栏嵌入式原生界面与交互 (Native Bar & UI)
     // ==========================================
     function injectStyles() {
         const css = `
             :root {
                 --wx-primary: #07c160;
                 --wx-primary-hover: #06ad56;
-                --wx-primary-light: rgba(7, 193, 96, 0.08);
-                --wx-bg-gray: #f7f7f7;
-                --wx-border-color: rgba(0, 0, 0, 0.08);
+                --wx-border: rgba(0, 0, 0, 0.12);
             }
 
             .chat-panel__input-operations {
@@ -1192,7 +1107,7 @@
                 display: inline-flex;
                 align-items: center;
                 gap: 4px;
-                background: #07c160;
+                background: var(--wx-primary);
                 color: #ffffff !important;
                 border: none;
                 border-radius: 5px;
@@ -1201,17 +1116,15 @@
                 font-size: 12px;
                 font-weight: 600;
                 cursor: pointer;
-                transition: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+                transition: all 0.15s ease;
                 line-height: 26px;
                 box-sizing: border-box;
             }
             .wx-btn-main:hover {
-                background: #06ad56;
+                background: var(--wx-primary-hover);
                 box-shadow: 0 2px 5px rgba(7, 193, 96, 0.3);
             }
-            .wx-btn-main:active {
-                transform: scale(0.97);
-            }
+            .wx-btn-main:active { transform: scale(0.97); }
 
             .wx-badge-num {
                 background: rgba(255, 255, 255, 0.28);
@@ -1232,7 +1145,7 @@
                 gap: 3px;
                 background: #ffffff;
                 color: #333333;
-                border: 1px solid rgba(0, 0, 0, 0.12);
+                border: 1px solid var(--wx-border);
                 border-radius: 5px;
                 padding: 0 7px;
                 height: 26px;
@@ -1243,19 +1156,17 @@
                 box-sizing: border-box;
             }
             .wx-btn-sub:hover {
-                border-color: #07c160;
-                color: #07c160;
+                border-color: var(--wx-primary);
+                color: var(--wx-primary);
                 background: rgba(7, 193, 96, 0.05);
             }
             .wx-btn-sub.active {
                 background: rgba(7, 193, 96, 0.1);
-                border-color: #07c160;
-                color: #07c160;
+                border-color: var(--wx-primary);
+                color: var(--wx-primary);
                 font-weight: 600;
             }
-            .wx-btn-sub:active {
-                transform: scale(0.97);
-            }
+            .wx-btn-sub:active { transform: scale(0.97); }
 
             .wx-svg-icon {
                 display: inline-block;
@@ -1286,12 +1197,10 @@
                 line-height: 22px;
                 box-sizing: border-box;
             }
-            .wx-seg-tab:hover {
-                color: #191919;
-            }
+            .wx-seg-tab:hover { color: #191919; }
             .wx-seg-tab.active {
                 background: #ffffff;
-                color: #07c160;
+                color: var(--wx-primary);
                 font-weight: 600;
                 box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
             }
@@ -1309,7 +1218,7 @@
             }
             .wx-search-field {
                 height: 26px;
-                border: 1px solid rgba(0, 0, 0, 0.12);
+                border: 1px solid var(--wx-border);
                 border-radius: 5px;
                 padding: 0 6px 0 22px;
                 font-size: 12px;
@@ -1322,7 +1231,7 @@
             }
             .wx-search-field:focus {
                 width: 100px;
-                border-color: #07c160;
+                border-color: var(--wx-primary);
                 box-shadow: 0 0 0 2px rgba(7, 193, 96, 0.15);
             }
 
@@ -1331,7 +1240,7 @@
                 align-items: center;
                 gap: 4px;
                 background: rgba(7, 193, 96, 0.08);
-                color: #07c160;
+                color: var(--wx-primary);
                 border-radius: 12px;
                 padding: 2px 8px;
                 font-size: 11px;
@@ -1343,7 +1252,7 @@
                 border: 1px solid rgba(7, 193, 96, 0.2);
             }
             .wx-msg-download-tag:hover {
-                background: #07c160;
+                background: var(--wx-primary);
                 color: #ffffff !important;
                 box-shadow: 0 2px 6px rgba(7, 193, 96, 0.25);
             }
@@ -1358,9 +1267,7 @@
                 background: #fafafa;
                 border-bottom: 1px solid rgba(0, 0, 0, 0.05);
             }
-            .wx-native-progress-container.show {
-                display: flex;
-            }
+            .wx-native-progress-container.show { display: flex; }
             .wx-native-progress-track {
                 flex: 1;
                 height: 4px;
@@ -1420,72 +1327,64 @@
         }
     }
 
-    /**
-     * 将工具条直接注入到底部文件夹图标 (.chat-panel__input-operations) 同一行
-     */
     function injectNativeInputOperationsBar() {
-        const oldTopBar = document.getElementById('wx-native-action-bar');
-        if (oldTopBar) oldTopBar.remove();
-
         const inputOps = document.querySelector('.chat-panel__input-operations');
-        if (!inputOps) return;
+        if (!inputOps || document.getElementById('wx-input-operations-bar')) return;
 
-        if (!document.getElementById('wx-input-operations-bar')) {
-            const bar = document.createElement('div');
-            bar.className = 'wx-input-operations-bar';
-            bar.id = 'wx-input-operations-bar';
+        const bar = document.createElement('div');
+        bar.className = 'wx-input-operations-bar';
+        bar.id = 'wx-input-operations-bar';
 
-            bar.innerHTML = `
-                <div class="wx-bar-left">
-                    <button class="wx-btn-main" id="wx-bar-btn-batch" title="一键批量下载当前所有筛选出的真实文件与高清原图">
-                        <svg class="wx-svg-icon" viewBox="0 0 24 24" width="13" height="13"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" fill="currentColor"/></svg>
-                        <span>批量下载</span>
-                        <span class="wx-badge-num" id="wx-bar-badge-count">0</span>
-                    </button>
-                    <button class="wx-btn-sub" id="wx-bar-btn-scan" title="重新扫描当前聊天界面">
-                        <svg class="wx-svg-icon" viewBox="0 0 24 24" width="12" height="12"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="currentColor"/></svg>
-                        <span>扫描</span>
-                    </button>
-                    <button class="wx-btn-sub" id="wx-bar-btn-autoscroll" title="向上自动连续拉取历史聊天记录">
-                        <svg class="wx-svg-icon" viewBox="0 0 24 24" width="12" height="12"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z" fill="currentColor"/></svg>
-                        <span>拉取历史</span>
-                    </button>
+        bar.innerHTML = `
+            <div class="wx-bar-left">
+                <button class="wx-btn-main" id="wx-bar-btn-batch" title="一键批量下载当前所有筛选出的真实文件与高清原图">
+                    <svg class="wx-svg-icon" viewBox="0 0 24 24" width="13" height="13"><path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" fill="currentColor"/></svg>
+                    <span>批量下载</span>
+                    <span class="wx-badge-num" id="wx-bar-badge-count">0</span>
+                </button>
+                <button class="wx-btn-sub" id="wx-bar-btn-scan" title="重新扫描当前聊天界面">
+                    <svg class="wx-svg-icon" viewBox="0 0 24 24" width="12" height="12"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="currentColor"/></svg>
+                    <span>扫描</span>
+                </button>
+                <button class="wx-btn-sub" id="wx-bar-btn-autoscroll" title="向上自动连续拉取历史聊天记录">
+                    <svg class="wx-svg-icon" viewBox="0 0 24 24" width="12" height="12"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z" fill="currentColor"/></svg>
+                    <span>拉取历史</span>
+                </button>
+            </div>
+
+            <div class="wx-bar-divider"></div>
+
+            <div class="wx-bar-right">
+                <div class="wx-segmented-tabs">
+                    <button class="wx-seg-tab active" data-type="all">全部</button>
+                    <button class="wx-seg-tab" data-type="image">原图</button>
+                    <button class="wx-seg-tab" data-type="file">文件</button>
+                    <button class="wx-seg-tab" data-type="video">视频</button>
                 </div>
-
-                <div class="wx-bar-divider"></div>
-
-                <div class="wx-bar-right">
-                    <div class="wx-segmented-tabs">
-                        <button class="wx-seg-tab active" data-type="all">全部</button>
-                        <button class="wx-seg-tab" data-type="image">原图</button>
-                        <button class="wx-seg-tab" data-type="file">文件</button>
-                        <button class="wx-seg-tab" data-type="video">视频</button>
-                    </div>
-                    <div class="wx-search-wrap">
-                        <svg class="wx-search-icon" viewBox="0 0 24 24" width="11" height="11"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="#999"/></svg>
-                        <input type="text" class="wx-search-field" id="wx-native-search-input" placeholder="过滤...">
-                    </div>
+                <div class="wx-search-wrap">
+                    <svg class="wx-search-icon" viewBox="0 0 24 24" width="11" height="11"><path d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z" fill="#999"/></svg>
+                    <input type="text" class="wx-search-field" id="wx-native-search-input" placeholder="过滤...">
                 </div>
+            </div>
+        `;
+
+        inputOps.appendChild(bar);
+
+        const chatInput = document.querySelector('.chat-panel__input');
+        if (chatInput && !document.getElementById('wx-native-progress-wrap')) {
+            const prog = document.createElement('div');
+            prog.className = 'wx-native-progress-container';
+            prog.id = 'wx-native-progress-wrap';
+            prog.innerHTML = `
+                <div class="wx-native-progress-track">
+                    <div class="wx-native-progress-bar" id="wx-native-progress-bar"></div>
+                </div>
+                <div class="wx-native-progress-text" id="wx-native-progress-text">准备下载...</div>
             `;
-
-            inputOps.appendChild(bar);
-
-            const chatInput = document.querySelector('.chat-panel__input');
-            if (chatInput && !document.getElementById('wx-native-progress-wrap')) {
-                const prog = document.createElement('div');
-                prog.className = 'wx-native-progress-container';
-                prog.id = 'wx-native-progress-wrap';
-                prog.innerHTML = `
-                    <div class="wx-native-progress-track">
-                        <div class="wx-native-progress-bar" id="wx-native-progress-bar"></div>
-                    </div>
-                    <div class="wx-native-progress-text" id="wx-native-progress-text">准备下载...</div>
-                `;
-                chatInput.insertBefore(prog, inputOps.nextSibling);
-            }
-
-            bindNativeActionBarEvents();
+            chatInput.insertBefore(prog, inputOps.nextSibling);
         }
+
+        bindNativeActionBarEvents();
     }
 
     function bindNativeActionBarEvents() {
@@ -1494,7 +1393,7 @@
 
         const scanBtn = document.getElementById('wx-bar-btn-scan');
         if (scanBtn) scanBtn.addEventListener('click', () => {
-            const count = scanDOM();
+            scanDOM();
             showToast(`🔍 扫描完成，共捕获 ${State.items.size} 个资源`, 'info');
         });
 
@@ -1522,9 +1421,8 @@
     function updateNativeUIState() {
         const count = getFilteredItems().length;
         const total = State.items.size;
-
-        const badge1 = document.getElementById('wx-bar-badge-count');
-        if (badge1) badge1.textContent = count === total ? `${total}` : `${count}/${total}`;
+        const badge = document.getElementById('wx-bar-badge-count');
+        if (badge) badge.textContent = count === total ? `${total}` : `${count}/${total}`;
     }
 
     function showInlineProgress(total) {
@@ -1566,27 +1464,22 @@
     }
 
     // ==========================================
-    // 7. 初始化启动 (Bootstrap)
+    // 8. 初始化启动 (Bootstrap)
     // ==========================================
     function init() {
         setupNetworkHooks();
         injectStyles();
 
-        document.getElementById('wx-native-action-bar')?.remove();
-        document.getElementById('wx-input-dl-btn')?.remove();
-        document.getElementById('wx-dl-float-btn')?.remove();
-        document.getElementById('wx-dl-drawer')?.remove();
-
-        if (document.readyState === 'loading') {
-            document.addEventListener('DOMContentLoaded', () => {
-                injectNativeInputOperationsBar();
-                setupDOMObserver();
-                setTimeout(scanDOM, 1000);
-            });
-        } else {
+        const onReady = () => {
             injectNativeInputOperationsBar();
             setupDOMObserver();
             setTimeout(scanDOM, 1000);
+        };
+
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', onReady);
+        } else {
+            onReady();
         }
     }
 
