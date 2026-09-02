@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         微信文件传输助手网页版 批量下载工具 (输入栏原生工具条版)
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.3
-// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，彻底解决页面卡顿与无响应！
+// @version      2.8.4
+// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，彻底解决HTM格式与数量不符问题！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
 // @grant        GM_xmlhttpRequest
@@ -71,7 +71,6 @@
                 } catch (err) {
                     results[curIdx] = null;
                 }
-                // 让出微任务切片，防止阻塞主渲染线程
                 await sleep(30);
             }
         }
@@ -172,7 +171,7 @@
     }
 
     /**
-     * 智能去除聊天前缀与净化文件名
+     * 智能净化微信文件名
      */
     function cleanWechatFileName(rawText) {
         if (!rawText) return '';
@@ -182,7 +181,7 @@
         name = name.replace(/^(微信用户|我|好友|文件)[:：\s]*/i, '');
         name = name.replace(/^[\d]{1,2}:[\d]{2}[:\s]*/, '');
 
-        const match = name.match(/([\w\u4e00-\u9fa5\.\-\s_#\(\)\[\]（）]+\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|txt|csv|mp3|mp4|apk|iso|tar|gz|json|md))/i);
+        const match = name.match(/([\w\u4e00-\u9fa5\.\-\s_#\(\)\[\]（）]+\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|cdr|psd|ai|txt|csv|mp3|mp4|apk|iso|tar|gz|json|md))/i);
         if (match) {
             return match[1].trim();
         }
@@ -193,17 +192,21 @@
      * 构建微信源文件的下载 URL
      */
     function buildFileDownloadUrl(msg, mediaId, fileName) {
-        if (!mediaId && !msg) return '';
-        const mid = mediaId || msg?.MediaId || '';
-        const name = fileName || msg?.FileName || 'file.bin';
-        const sender = (msg && (msg.FromUserName || msg.ToUserName)) || State.authParams.currentUser || 'filehelper';
-        const fromUser = (msg && msg.FromUserName) || State.authParams.currentUser || 'filehelper';
-        const fromUserParam = fromUser ? `&fromuser=${encodeURIComponent(fromUser)}` : '';
-        const skey = State.authParams.skey ? `&skey=${encodeURIComponent(State.authParams.skey)}` : '';
-        const passTicket = State.authParams.pass_ticket ? `&pass_ticket=${encodeURIComponent(State.authParams.pass_ticket)}` : '';
-        const dataTicket = State.authParams.dataTicket ? `&webwx_data_ticket=${encodeURIComponent(State.authParams.dataTicket)}` : '';
+        const mid = mediaId || msg?.MediaId || msg?.mediaId || msg?.attachId || '';
+        const name = fileName || msg?.FileName || msg?.title || 'file.bin';
+        const sender = msg?.FromUserName || State.authParams.currentUser || 'filehelper';
+        const fromUser = msg?.FromUserName || State.authParams.currentUser || 'filehelper';
+        
+        let params = [];
+        params.push(`sender=${encodeURIComponent(sender)}`);
+        if (mid) params.push(`mediaid=${encodeURIComponent(mid)}`);
+        params.push(`filename=${encodeURIComponent(name)}`);
+        if (fromUser) params.push(`fromuser=${encodeURIComponent(fromUser)}`);
+        if (State.authParams.skey) params.push(`skey=${encodeURIComponent(State.authParams.skey)}`);
+        if (State.authParams.pass_ticket) params.push(`pass_ticket=${encodeURIComponent(State.authParams.pass_ticket)}`);
+        if (State.authParams.dataTicket) params.push(`webwx_data_ticket=${encodeURIComponent(State.authParams.dataTicket)}`);
 
-        return `/cgi-bin/mmwebwx-bin/webwxgetmedia?sender=${encodeURIComponent(sender)}&mediaid=${encodeURIComponent(mid)}&filename=${encodeURIComponent(name)}${fromUserParam}${skey}${passTicket}${dataTicket}`;
+        return `/cgi-bin/mmwebwx-bin/webwxgetmedia?` + params.join('&');
     }
 
     /**
@@ -215,7 +218,7 @@
         const ext = (itemName || '').split('.').pop().toLowerCase();
 
         if (ext !== 'html' && ext !== 'htm' && ext !== 'xml') {
-            if (type.includes('text/html') || type.includes('text/xml')) {
+            if (type.includes('text/html') || type.includes('text/xml') || type.includes('application/json')) {
                 return false;
             }
         }
@@ -226,36 +229,15 @@
         if (!contentType) return false;
         const ext = (fileName || '').split('.').pop().toLowerCase();
         if (ext === 'html' || ext === 'htm' || ext === 'xml') return false;
-        if (contentType.includes('text/html') || contentType.includes('text/xml')) return true;
+        if (contentType.includes('text/html') || contentType.includes('text/xml') || contentType.includes('application/json')) return true;
         return false;
-    }
-
-    /**
-     * 为每个图片生成真正的唯一键（避免合并丢失）
-     */
-    function getImageUniqueKey(item) {
-        const msgId = item.rawMsg?.MsgId || item.msgId || extractMsgIdFromUrl(item.url) || extractMsgIdFromUrl(item.previewUrl);
-        if (msgId) {
-            return `image_msg_${msgId}`;
-        }
-        if (item.element) {
-            if (!item.element._wx_img_id) {
-                State.elementCounter++;
-                item.element._wx_img_id = `el_${Date.now()}_${State.elementCounter}`;
-            }
-            return `image_${item.element._wx_img_id}`;
-        }
-        if (item.url) {
-            return `image_url_${hashString(item.url)}`;
-        }
-        return `image_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`;
     }
 
     /**
      * 智能去重与数据项管理
      */
     function addItem(item) {
-        if (!item || (!item.url && !item.name && !item.element)) return;
+        if (!item || (!item.url && !item.name && !item.element && !item.downloadBtn)) return;
 
         const isImage = item.type === 'image';
         const isFile = item.type === 'file';
@@ -276,13 +258,9 @@
         let key = null;
 
         if (isFile) {
-            if (item.rawMsg?.MsgId) {
-                key = `file_msg_${item.rawMsg.MsgId}`;
-            } else {
-                key = `file_${cleanName.toLowerCase()}`;
-            }
+            key = `file_${cleanName.toLowerCase()}`;
         } else if (isImage) {
-            key = getImageUniqueKey({ ...item, url: hdUrl, previewUrl, msgId });
+            key = msgId ? `image_msg_${msgId}` : `image_${hashString(hdUrl || previewUrl)}`;
         } else {
             key = `video_${msgId || Date.now()}_${Math.random().toString(36).substr(2, 4)}`;
         }
@@ -309,6 +287,7 @@
                 msgId: msgId,
                 rawMsg: item.rawMsg || null,
                 element: item.element || null,
+                downloadBtn: item.downloadBtn || null,
                 blob: item.blob || null,
                 selected: true
             };
@@ -327,10 +306,8 @@
                 existing.formattedSize = formatBytes(item.size);
             }
             if (item.blob && !existing.blob) existing.blob = item.blob;
-            if (item.element) {
-                existing.element = item.element;
-                attachInlineTagToElement(existing);
-            }
+            if (item.element) existing.element = item.element;
+            if (item.downloadBtn) existing.downloadBtn = item.downloadBtn;
             if (item.rawMsg && !existing.rawMsg) existing.rawMsg = item.rawMsg;
             if (item.mediaId && !existing.mediaId) existing.mediaId = item.mediaId;
         }
@@ -413,7 +390,6 @@
             return origOpenWin.apply(this, arguments);
         };
 
-        // 拦截 <a> 点击提取凭证
         const origAnchorClick = win.HTMLAnchorElement.prototype.click;
         win.HTMLAnchorElement.prototype.click = function () {
             try {
@@ -481,7 +457,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.3 ready.');
+        console.log('[WeChat Downloader] v2.8.4 ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -535,7 +511,7 @@
             const thumbUrl = msg.thumb_url || `/cgi-bin/mmwebwx-bin/webwxgetmsgimg?&MsgID=${msgId}${skey}${passTicket}&type=slave`;
 
             addItem({
-                id: `msg_${msgId}`,
+                id: `image_msg_${msgId}`,
                 msgId: msgId,
                 type: 'image',
                 name: `image_${msgId}.jpg`,
@@ -580,7 +556,7 @@
             }
 
             addItem({
-                id: `file_${msgId}`,
+                id: `file_${fileName.toLowerCase()}`,
                 msgId: msgId,
                 type: 'file',
                 name: fileName,
@@ -603,72 +579,47 @@
     }
 
     // ==========================================
-    // 3. DOM 扫描与动态节点定位 (DOM Scanner)
+    // 3. 精准 DOM 扫描 (Message-Scoped Scanner)
     // ==========================================
-    function extractComponentData(element) {
-        if (!element) return null;
-        let curr = element;
-        let depth = 0;
-        while (curr && depth < 6) {
+    function extractMsgFromElement(el) {
+        if (!el) return null;
+        const msgItem = el.closest('.msg-item') || el.closest('.msg-list__item') || el.closest('li') || el;
+        
+        let curr = msgItem;
+        while (curr && curr !== document.body) {
+            if (curr.__vueParentComponent) {
+                const comp = curr.__vueParentComponent;
+                const item = comp.props?.item || comp.props?.msg || comp.setupState?.item || comp.setupState?.msg || comp.data?.item;
+                if (item) return item;
+            }
+            if (curr.__vnode) {
+                const vn = curr.__vnode;
+                const item = vn.props?.item || vn.props?.msg || vn.memoizedProps?.item;
+                if (item && typeof item === 'object') return item;
+            }
             if (curr.__vue__) {
                 const v = curr.__vue__;
-                const msg = v.msg || v.message || v.item || v.data || v.file;
-                if (msg) return msg;
-            }
-            if (curr.__vnode || curr.__vueParentComponent) {
-                const comp = curr.__vueParentComponent;
-                const props = comp?.props || comp?.setupState;
-                if (props?.msg || props?.message || props?.item || props?.file) {
-                    return props.msg || props.message || props.item || props.file;
-                }
-            }
-            for (const key of Object.keys(curr)) {
-                if (key.startsWith('__reactFiber') || key.startsWith('__reactInternalInstance')) {
-                    let f = curr[key];
-                    while (f) {
-                        if (f.memoizedProps?.msg || f.memoizedProps?.message || f.memoizedProps?.item || f.memoizedProps?.file) {
-                            return f.memoizedProps.msg || f.memoizedProps.message || f.memoizedProps.item || f.memoizedProps.file;
-                        }
-                        f = f.return;
-                    }
-                }
+                const item = v.item || v.msg || v.data?.item;
+                if (item) return item;
             }
             curr = curr.parentElement;
-            depth++;
         }
         return null;
     }
 
-    /**
-     * 严格检查图片是否为非聊天主图（如头像、文件类型图标、表情、功能按钮等）
-     */
     function isAvatarOrIcon(img) {
         if (!img) return true;
         const cls = (img.className || '').toLowerCase();
         const src = (img.src || '').toLowerCase();
         const alt = (img.alt || '').toLowerCase();
 
-        // 1. 如果图片处于文件卡片内部，它是文件类型图标（如 PDF 图标），绝不是聊天图片
-        if (img.closest('[class*="file"], [class*="attach"], [class*="doc"], [class*="card"]')) {
+        if (cls.includes('avatar') || cls.includes('head') || cls.includes('icon') || cls.includes('qrcode') || cls.includes('emoji')) {
+            return true;
+        }
+        if (img.closest('.msg-avatar, .file-icon, .chat-panel__header, .chat-panel__input, .wx-input-operations-bar')) {
             return true;
         }
 
-        // 2. 如果图片处于头像或界面组件中
-        if (img.closest('[class*="avatar"], [class*="head"], [class*="user"], .chat-panel__header, .chat-panel__input, .wx-input-operations-bar')) {
-            return true;
-        }
-
-        // 3. 常见系统/格式图标关键词过滤
-        const iconKeywords = [
-            'qrcode', 'avatar', 'head', 'icon', 'emoji', 'default_', 'logo',
-            'pdf', 'word', 'doc', 'excel', 'xls', 'ppt', 'zip', 'rar', 'file',
-            'arrow', 'download', 'btn', 'status', 'empty', 'loading', 'play'
-        ];
-        if (iconKeywords.some(k => cls.includes(k) || src.includes(k) || alt.includes(k))) {
-            return true;
-        }
-
-        // 4. 小尺寸过滤（小图标一般宽高小于 65px）
         const w = img.naturalWidth || img.clientWidth || img.width || 0;
         const h = img.naturalHeight || img.clientHeight || img.height || 0;
         if (w > 0 && w <= 65 && h > 0 && h <= 65) return true;
@@ -687,40 +638,11 @@
     }
 
     /**
-     * 从 <img> 元素直接提取 Canvas 二进制 Blob
-     */
-    function getBlobFromImageElement(imgEl) {
-        if (!imgEl) return Promise.resolve(null);
-        return new Promise((resolve) => {
-            try {
-                if (imgEl.src && imgEl.src.startsWith('data:image')) {
-                    fetch(imgEl.src).then(r => r.blob()).then(b => resolve(b)).catch(() => resolve(null));
-                    return;
-                }
-                const canvas = document.createElement('canvas');
-                canvas.width = imgEl.naturalWidth || imgEl.clientWidth || 300;
-                canvas.height = imgEl.naturalHeight || imgEl.clientHeight || 300;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(imgEl, 0, 0);
-                canvas.toBlob((blob) => {
-                    if (blob && blob.size > 0) {
-                        resolve(blob);
-                    } else {
-                        resolve(null);
-                    }
-                }, 'image/jpeg', 0.95);
-            } catch (e) {
-                resolve(null);
-            }
-        });
-    }
-
-    /**
-     * 将下载按钮直接注入到原生聊天气泡卡片右上角/下方
+     * 将下载按钮直接注入到原生聊天气泡卡片下方
      */
     function attachInlineTagToElement(item) {
         if (!item.element) return;
-        const parentCard = item.element.closest('[class*="file"], [class*="msg"], [class*="bubble"], [class*="item"], [class*="card"], [class*="content"]') || item.element.parentElement || item.element;
+        const parentCard = item.element.querySelector('.msg-file__content') || item.element.querySelector('.msg-item__content') || item.element;
         if (!parentCard || parentCard.querySelector('.wx-msg-download-tag')) return;
 
         const tag = document.createElement('div');
@@ -736,15 +658,21 @@
             showToast(`⏳ 正在准备: ${item.name}`, 'info');
             try {
                 const blob = await fetchFileBlob(item);
-                if (blob) {
+                if (blob && isRealBinaryBlob(blob, item.name)) {
                     saveBlob(blob, item.name);
-                } else if (item.url && !item.url.startsWith('#')) {
+                    showToast(`✅ ${item.name} 已保存`, 'success');
+                } else if (item.downloadBtn) {
+                    item.downloadBtn.click();
+                    showToast(`✅ ${item.name} 已触发直下`, 'success');
+                } else if (item.url && !item.url.startsWith('#') && !item.url.startsWith('javascript')) {
                     saveDirectUrl(item.url, item.name);
+                    showToast(`✅ ${item.name} 已触发直下`, 'success');
+                } else {
+                    showToast(`❌ 未能获取该文件下载通道`, 'error');
                 }
-                showToast(`✅ ${item.name} 已保存`, 'success');
             } catch (err) {
-                if (item.url && !item.url.startsWith('#')) {
-                    saveDirectUrl(item.url, item.name);
+                if (item.downloadBtn) {
+                    item.downloadBtn.click();
                     showToast(`✅ ${item.name} 已触发直下`, 'success');
                 } else {
                     showToast(`❌ 下载失败: ${err.message}`, 'error');
@@ -755,79 +683,71 @@
         parentCard.appendChild(tag);
     }
 
+    /**
+     * 针对每条消息精确解析，避免误判图标
+     */
     function scanDOM() {
         injectNativeInputOperationsBar();
 
         const chatBody = document.getElementById('chatBody') || document.querySelector('.chat-panel__body');
         if (!chatBody) return 0;
 
+        const msgItems = chatBody.querySelectorAll('.msg-item');
         let scannedCount = 0;
-        const fileRegex = /([\w\u4e00-\u9fa5\.\-\s_#\(\)\[\]（）]+\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|txt|csv|mp3|mp4|apk|iso|tar|gz|json|md))/i;
 
-        // 1. 扫描文件（仅在 chatBody 内部扫描）
-        const allEls = Array.from(chatBody.querySelectorAll('*')).filter(el => {
-            if (el.closest('.wx-input-operations-bar, #wx-toast-container, .wx-msg-download-tag')) return false;
-            return el.textContent && fileRegex.test(el.textContent);
-        });
+        msgItems.forEach(msgEl => {
+            // 1. 检查是否为文件消息
+            const fileTitleEl = msgEl.querySelector('.msg-file__title');
+            const fileCard = msgEl.querySelector('.msg-file');
+            
+            if (fileTitleEl || fileCard) {
+                const rawTitle = fileTitleEl ? (fileTitleEl.childNodes[0]?.textContent || fileTitleEl.textContent) : (fileCard.textContent || '');
+                const cleanName = cleanWechatFileName(rawTitle);
 
-        allEls.sort((a, b) => a.querySelectorAll('*').length - b.querySelectorAll('*').length);
-
-        const seenCleanFiles = new Set();
-        allEls.forEach(el => {
-            const match = el.textContent.match(fileRegex);
-            if (match && match[0]) {
-                const cleanName = cleanWechatFileName(match[0]);
-                if (!seenCleanFiles.has(cleanName)) {
-                    seenCleanFiles.add(cleanName);
-                    const compData = extractComponentData(el);
+                if (cleanName) {
+                    const compData = extractMsgFromElement(msgEl);
                     const mediaId = compData ? (compData.MediaId || compData.mediaId || compData.attachId) : '';
+                    const dlBtn = msgEl.querySelector('.icon__download');
+
                     let href = '';
                     if (compData || mediaId) {
                         href = buildFileDownloadUrl(compData, mediaId, cleanName);
                     }
 
                     addItem({
-                        id: compData?.MsgId ? `msg_${compData.MsgId}` : `file_${sanitizeFilename(cleanName)}`,
+                        id: `file_${cleanName.toLowerCase()}`,
                         type: 'file',
                         name: cleanName,
                         url: href || 'javascript:void(0)',
                         mediaId: mediaId,
                         rawMsg: compData,
-                        element: el
+                        element: msgEl,
+                        downloadBtn: dlBtn
                     });
                     scannedCount++;
                 }
+                return; // 文件消息处理完毕，不处理子图片
             }
-        });
 
-        // 2. 扫描聊天图片 (仅在 chatBody 内部且严格排除文件图标、头像)
-        const allImages = chatBody.querySelectorAll('img');
-        allImages.forEach(img => {
-            if (img.closest('.wx-input-operations-bar, #wx-toast-container, .wx-msg-download-tag')) return;
-            if (isAvatarOrIcon(img)) return;
-
-            const rawSrc = img.getAttribute('data-big-src') ||
-                           img.getAttribute('data-origin') ||
-                           img.getAttribute('data-original') ||
-                           img.getAttribute('data-hd-src') ||
-                           img.getAttribute('data-src') ||
-                           img.currentSrc ||
-                           img.src;
-
-            if (rawSrc && !rawSrc.startsWith('data:image/svg')) {
-                const compData = extractComponentData(img);
-                const msgId = compData?.MsgId || img.getAttribute('data-id') || extractMsgIdFromUrl(rawSrc);
-                addItem({
-                    id: msgId ? `msg_${msgId}` : null,
-                    msgId: msgId,
-                    type: 'image',
-                    name: `image_${msgId || Date.now()}.jpg`,
-                    url: getHdMediaUrl(rawSrc, msgId),
-                    previewUrl: rawSrc,
-                    rawMsg: compData,
-                    element: img
-                });
-                scannedCount++;
+            // 2. 检查是否为图片消息 (严格排除头像与文件图标)
+            const chatImg = msgEl.querySelector('.msg-img, img.picture, img.content-img, img[data-big-src]');
+            if (chatImg && !isAvatarOrIcon(chatImg)) {
+                const rawSrc = chatImg.getAttribute('data-big-src') || chatImg.getAttribute('data-src') || chatImg.src;
+                if (rawSrc && !rawSrc.startsWith('data:image/svg')) {
+                    const compData = extractMsgFromElement(msgEl);
+                    const msgId = compData?.MsgId || extractMsgIdFromUrl(rawSrc);
+                    addItem({
+                        id: msgId ? `image_msg_${msgId}` : `image_${hashString(rawSrc)}`,
+                        msgId: msgId,
+                        type: 'image',
+                        name: `image_${msgId || Date.now()}.jpg`,
+                        url: getHdMediaUrl(rawSrc, msgId),
+                        previewUrl: rawSrc,
+                        rawMsg: compData,
+                        element: chatImg
+                    });
+                    scannedCount++;
+                }
             }
         });
 
@@ -871,25 +791,7 @@
         if (chatBody && chatBody.scrollHeight > chatBody.clientHeight) {
             return chatBody;
         }
-
-        const potentialElements = Array.from(document.querySelectorAll('*'));
-        let bestContainer = null;
-        let maxScore = -1;
-
-        for (const el of potentialElements) {
-            if (el.scrollHeight > el.clientHeight && el.clientHeight > 200) {
-                const style = window.getComputedStyle(el);
-                if (style.overflowY === 'auto' || style.overflowY === 'scroll') {
-                    const childCount = el.querySelectorAll('img, [class*="msg"], [class*="chat"]').length;
-                    const score = el.clientHeight + childCount * 10;
-                    if (score > maxScore) {
-                        maxScore = score;
-                        bestContainer = el;
-                    }
-                }
-            }
-        }
-        return bestContainer || document.scrollingElement || document.documentElement;
+        return document.scrollingElement || document.documentElement;
     }
 
     function toggleAutoScroll() {
@@ -972,7 +874,7 @@
 
         let absUrl = rawUrl.startsWith('/') ? (window.location.origin + rawUrl) : rawUrl;
 
-        // 1. 原生 Fetch (3 秒超时，不阻塞)
+        // 1. 原生 Fetch
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 3000);
@@ -992,7 +894,7 @@
             }
         } catch (e) {}
 
-        // 2. GM_xmlhttpRequest (4 秒超时)
+        // 2. GM_xmlhttpRequest
         try {
             const gmBlob = await new Promise((resolve) => {
                 let resolved = false;
@@ -1069,18 +971,9 @@
 
         for (const u of candidateUrls) {
             const blob = await fetchBinaryBlobFromUrl(u, item.name);
-            if (blob) {
+            if (blob && isRealBinaryBlob(blob, item.name)) {
                 item.blob = blob;
                 return blob;
-            }
-        }
-
-        // 图片兜底：从 Canvas 提取
-        if (item.type === 'image' && item.element) {
-            const canvasBlob = await getBlobFromImageElement(item.element);
-            if (canvasBlob && canvasBlob.size > 0) {
-                item.blob = canvasBlob;
-                return canvasBlob;
             }
         }
 
@@ -1096,7 +989,7 @@
     }
 
     /**
-     * 极速无卡顿批量下载调度器
+     * 极速无卡顿批量下载调度器 (保障 100% 真实原文件格式，绝不落盘 HTML)
      */
     async function startBatchDownload() {
         const selectedItems = getFilteredItems();
@@ -1109,8 +1002,8 @@
         const total = selectedItems.length;
         showInlineProgress(total);
 
-        // ===== 阶段 1：在后台尝试读取数据流 =====
-        updateInlineProgress(0, total, '正在后台读取数据流...');
+        // ===== 阶段 1：在后台尝试读取二进制数据流 =====
+        updateInlineProgress(0, total, '正在后台准备数据流...');
 
         let fetchedCount = 0;
         const fetchedList = await mapLimit(selectedItems, 2, async (item) => {
@@ -1133,22 +1026,32 @@
         }
 
         // ===== 阶段 2：数据就绪后，极速顺畅保存 =====
-        const validItems = fetchedList.filter(x => x && (x.blob || (x.item && x.item.url && !x.item.url.startsWith('#'))));
-        updateInlineProgress(total, total, `🚀 正在批量保存 (${validItems.length} 项)...`);
+        updateInlineProgress(total, total, `🚀 正在批量保存 (${selectedItems.length} 项)...`);
 
         let successCount = 0;
         let failCount = 0;
 
-        for (let i = 0; i < validItems.length; i++) {
-            const { item, blob, name } = validItems[i];
+        for (let i = 0; i < fetchedList.length; i++) {
+            const { item, blob, name } = fetchedList[i];
             try {
-                if (blob) {
+                // 1. 如果成功抓取到真实二进制 Blob，直接极速落盘
+                if (blob && isRealBinaryBlob(blob, name)) {
                     saveBlob(blob, name);
-                } else if (item && item.url) {
-                    saveDirectUrl(item.url, name);
+                    successCount++;
                 }
-                successCount++;
-                await sleep(200); // 间隔确保浏览器顺畅保存
+                // 2. 如果后台请求被鉴权拦截或返回HTML，则直接触发原生专属下载按钮，保证100%源文件格式
+                else if (item.downloadBtn) {
+                    item.downloadBtn.click();
+                    successCount++;
+                }
+                // 3. 兜底直下 URL
+                else if (item.url && !item.url.startsWith('#') && !item.url.startsWith('javascript')) {
+                    saveDirectUrl(item.url, name);
+                    successCount++;
+                } else {
+                    failCount++;
+                }
+                await sleep(200);
             } catch (e) {
                 failCount++;
             }
@@ -1179,7 +1082,6 @@
                 --wx-border-color: rgba(0, 0, 0, 0.08);
             }
 
-            /* 修正原生输入操作栏样式，使其支持横向排版 */
             .chat-panel__input-operations {
                 display: flex !important;
                 align-items: center !important;
@@ -1189,7 +1091,6 @@
                 min-height: 36px !important;
             }
 
-            /* 原生文件上传图标项 */
             .chat-panel__input-item {
                 display: inline-flex !important;
                 align-items: center !important;
@@ -1198,7 +1099,6 @@
                 margin-right: 6px !important;
             }
 
-            /* ===== 嵌入在文件夹图标同一行的工具条 ===== */
             .wx-input-operations-bar {
                 display: flex;
                 align-items: center;
@@ -1232,7 +1132,6 @@
                 flex-shrink: 0;
             }
 
-            /* 主下载按钮 */
             .wx-btn-main {
                 display: inline-flex;
                 align-items: center;
@@ -1271,7 +1170,6 @@
                 text-align: center;
             }
 
-            /* 次级按钮 (扫描、历史) */
             .wx-btn-sub {
                 display: inline-flex;
                 align-items: center;
@@ -1309,7 +1207,6 @@
                 flex-shrink: 0;
             }
 
-            /* 分段选项卡 (全部 / 原图 / 文件 / 视频) */
             .wx-segmented-tabs {
                 display: inline-flex;
                 background: rgba(0, 0, 0, 0.06);
@@ -1343,7 +1240,6 @@
                 box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
             }
 
-            /* 过滤搜索框 */
             .wx-search-wrap {
                 display: inline-flex;
                 align-items: center;
@@ -1374,7 +1270,6 @@
                 box-shadow: 0 0 0 2px rgba(7, 193, 96, 0.15);
             }
 
-            /* ===== 原生消息气泡上的内嵌下载标签 ===== */
             .wx-msg-download-tag {
                 display: inline-flex;
                 align-items: center;
@@ -1397,7 +1292,6 @@
                 box-shadow: 0 2px 6px rgba(7, 193, 96, 0.25);
             }
 
-            /* ===== 输入栏上方的内嵌进度指示条 ===== */
             .wx-native-progress-container {
                 width: 100%;
                 display: none;
