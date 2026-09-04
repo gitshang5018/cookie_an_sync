@@ -1,10 +1,12 @@
 // ==UserScript==
 // @name         微信文件传输助手网页版 批量下载工具
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.7
-// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，下载真实原图与原文件！
+// @version      2.8.9
+// @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com / szfilehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，下载真实原图与原文件！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
+// @match        https://szfilehelper.weixin.qq.com/*
+// @icon         https://res.wx.qq.com/a/wx_fed/assets/res/NTI4MWU5.ico
 // @grant        GM_xmlhttpRequest
 // @grant        GM_download
 // @grant        GM_addStyle
@@ -101,14 +103,46 @@
     }
 
     function cleanWechatFileName(rawText) {
-        if (!rawText) return '';
-        let name = rawText.trim()
+        if (!rawText || typeof rawText !== 'string') return '';
+        let name = rawText.trim().slice(0, 300)
             .replace(/^.*?[的]?文件传输助手[:：\s]*/i, '')
             .replace(/^(微信用户|我|好友|文件)[:：\s]*/i, '')
-            .replace(/^[\d]{1,2}:[\d]{2}[:\s]*/, '');
+            .replace(/^[\d]{1,2}:[\d]{2}[:\s]*/, '')
+            .trim();
 
-        const match = name.match(/([\w\u4e00-\u9fa5\.\-\s_#\(\)\[\]（）]+\.(?:pdf|docx?|xlsx?|pptx?|zip|rar|7z|cdr|psd|ai|txt|csv|mp3|mp4|apk|iso|tar|gz|json|md|wps|et|dps))/i);
-        return match ? match[1].trim() : name.trim();
+        const extPattern = 'tar\\.gz|pdf|docx?|xlsx?|pptx?|zip|rar|7z|cdr|psd|ai|txt|csv|mp3|mp4|apk|iso|tar|gz|json|md|wps|et|dps';
+        const extRegex = new RegExp('\\.(?:' + extPattern + ')$', 'i');
+
+        const lines = name.split(/[\r\n]+/).map(l => l.trim()).filter(Boolean);
+        for (const line of lines) {
+            const words = line.split(/\s+/);
+            for (let i = words.length - 1; i >= 0; i--) {
+                const w = words[i].replace(/^[（\(]+/, '').replace(/[）\)]+$/, '');
+                if (extRegex.test(w)) {
+                    let fileCandidate = w;
+                    let j = i - 1;
+                    while (j >= 0) {
+                        const prev = words[j];
+                        // 遇到容量（如 12MB/30MB）、百分比、标点括号、状态词则停止向前拼接
+                        if (/(?:MB|KB|GB|B|%|\/|:|正在|上传|发送|请稍候|[（\(])/i.test(prev)) {
+                            break;
+                        }
+                        fileCandidate = prev + ' ' + fileCandidate;
+                        j--;
+                    }
+                    return fileCandidate.trim();
+                }
+            }
+
+            // 行内正则安全匹配（无灾难性回溯）
+            const inline = line.match(new RegExp('([\\w\\u4e00-\\u9fa5\\.\\-_#\\(\\)（）]+?\\.(?:' + extPattern + '))', 'i'));
+            if (inline) {
+                return inline[1].trim();
+            }
+        }
+
+        const firstLine = (lines[0] || name).trim();
+        return firstLine.length > 80 ? firstLine.slice(0, 80) : firstLine;
     }
 
     function sanitizeFilename(name) {
@@ -409,6 +443,11 @@
         win.URL.createObjectURL = function (obj) {
             const blobUrl = origCreateObjectURL.apply(this, arguments);
             if (obj instanceof Blob && obj.size > 0) {
+                // 上限 50 个，避免大文件上传分片永久滞留内存造成卡顿
+                if (State.blobs.size >= 50) {
+                    const oldest = State.blobs.keys().next().value;
+                    if (oldest) State.blobs.delete(oldest);
+                }
                 State.blobs.set(blobUrl, obj);
                 for (const item of State.items.values()) {
                     if (item.url === blobUrl || item.previewUrl === blobUrl) {
@@ -483,7 +522,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.7 engine ready.');
+        console.log('[WeChat Downloader] v2.8.9 engine ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -609,10 +648,40 @@
         return null;
     }
 
+    function isMsgSending(msgEl) {
+        if (!msgEl) return false;
+        if (msgEl.classList.contains('is-sending') || 
+            msgEl.classList.contains('msg-item--sending') || 
+            msgEl.classList.contains('uploading')) {
+            return true;
+        }
+        if (msgEl.querySelector('.weui-loading, .icon__loading, .msg-loading, .progress-bar, .upload-progress, [class*="loading"], [class*="sending"]')) {
+            return true;
+        }
+        const txt = msgEl.textContent || '';
+        if ((txt.includes('正在上传') || txt.includes('正在发送') || txt.includes('等待发送')) && !msgEl.querySelector('.icon__download')) {
+            return true;
+        }
+        return false;
+    }
+
     function attachInlineTagToElement(item) {
         if (!item.element) return;
-        const parentCard = item.element.querySelector('.msg-file__content') || item.element.querySelector('.msg-image') || item.element.querySelector('.msg-item__content') || item.element;
-        if (!parentCard || parentCard.querySelector('.wx-msg-download-tag')) return;
+        let parentCard = item.element.querySelector('.msg-file__content') || 
+                         item.element.querySelector('.msg-image') || 
+                         item.element.querySelector('.msg-item__content') || 
+                         item.element;
+        if (!parentCard) return;
+
+        // 若挂载目标为 IMG 空元素，必须自动回退至其外层容器元素，绝不向 IMG 注入子节点
+        if (parentCard.tagName === 'IMG') {
+            parentCard = parentCard.parentElement || parentCard;
+        }
+        if (parentCard.tagName === 'IMG' || parentCard.querySelector('.wx-msg-download-tag')) return;
+
+        // 若所属卡片正在上传/发送中，绝不强行插入 DOM 干扰 Vue diff
+        const msgEl = parentCard.closest('.msg-item');
+        if (isMsgSending(msgEl)) return;
 
         const tag = document.createElement('div');
         tag.className = 'wx-msg-download-tag';
@@ -662,6 +731,9 @@
         let scannedCount = 0;
 
         msgItems.forEach(msgEl => {
+            // 安全屏障：跳过任何正在上传或发送中的临时消息卡片，防止干扰微信文件发送与界面渲染
+            if (isMsgSending(msgEl)) return;
+
             // 1. 检查是否为文件消息 (.msg-file)
             const fileTitleEl = msgEl.querySelector('.msg-file__title');
             const fileCard = msgEl.querySelector('.msg-file');
@@ -750,28 +822,58 @@
 
     function setupDOMObserver() {
         let timer = null;
+        let lastScanTime = 0;
+
+        const triggerScan = () => {
+            const now = Date.now();
+            if (now - lastScanTime < 500) {
+                clearTimeout(timer);
+                timer = setTimeout(triggerScan, 500);
+                return;
+            }
+            lastScanTime = now;
+            injectNativeInputOperationsBar();
+            scanDOM();
+        };
+
         const observer = new MutationObserver((mutations) => {
             let shouldScan = false;
             for (const mut of mutations) {
                 if (mut.addedNodes.length > 0) {
                     for (const node of mut.addedNodes) {
-                        if (node.nodeType === 1 && !node.classList?.contains('wx-msg-download-tag') && !node.closest?.('.wx-input-operations-bar')) {
-                            shouldScan = true;
-                            break;
+                        if (node.nodeType === 1) {
+                            // 忽略脚本内部创建的 UI、进度条、Toast、输入操作栏等
+                            if (node.classList?.contains('wx-msg-download-tag') || 
+                                node.closest?.('.wx-input-operations-bar') ||
+                                node.closest?.('.wx-native-progress-container') ||
+                                node.id === 'wx-toast-container') {
+                                continue;
+                            }
+                            // 仅当新增节点包含消息列表项时触发扫描
+                            if (node.classList?.contains('msg-item') || 
+                                node.querySelector?.('.msg-item') ||
+                                node.closest?.('#chatBody, .chat-panel__body, .chat-panel__messages')) {
+                                shouldScan = true;
+                                break;
+                            }
                         }
                     }
                 }
+                if (shouldScan) break;
             }
             if (shouldScan) {
                 clearTimeout(timer);
-                timer = setTimeout(() => {
-                    injectNativeInputOperationsBar();
-                    scanDOM();
-                }, 300);
+                timer = setTimeout(triggerScan, 400);
             }
         });
 
-        observer.observe(document.documentElement, { childList: true, subtree: true });
+        // 优先精准监听聊天消息容器，避免监听整棵页面树导致上传大文件时的密集卡顿
+        const targetContainer = document.getElementById('chatBody') || 
+                                document.querySelector('.chat-panel__body') || 
+                                document.querySelector('.chat-panel__messages') || 
+                                document.body;
+
+        observer.observe(targetContainer, { childList: true, subtree: true });
     }
 
     // ==========================================

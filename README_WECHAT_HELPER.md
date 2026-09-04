@@ -1,7 +1,10 @@
 # 微信文件传输助手网页版 批量下载油猴脚本使用说明
 
 ## 📖 脚本介绍
-本脚本专为 [微信文件传输助手网页版 (filehelper.weixin.qq.com)](https://filehelper.weixin.qq.com/?from=webapp) 深度定制。
+本脚本专为微信文件传输助手网页版深度定制，同时完美支持官方双域名：
+- [filehelper.weixin.qq.com](https://filehelper.weixin.qq.com/?from=webapp)
+- [szfilehelper.weixin.qq.com](https://szfilehelper.weixin.qq.com/)
+
 **100% 原生 UI 深度整合、零弹窗、零浮窗**，提供原始真实文件（PDF/Word/Excel等）、高清原图和视频的一键极速批量下载能力。
 
 ---
@@ -42,7 +45,9 @@
    - 按 `Ctrl + S` 保存脚本。
 
 3. **使用方法**：
-   - 打开微信文件传输助手网页版：[https://filehelper.weixin.qq.com/?from=webapp](https://filehelper.weixin.qq.com/?from=webapp)
+   - 打开微信文件传输助手网页版（以下任意官方地址均可）：
+     - [https://filehelper.weixin.qq.com/?from=webapp](https://filehelper.weixin.qq.com/?from=webapp)
+     - [https://szfilehelper.weixin.qq.com/](https://szfilehelper.weixin.qq.com/)
    - 手机微信扫码登录。
    - 在输入框上方 `📁` 文件夹图标右侧，即可看到原生工具栏：
      - 点击 **`📥 批量下载 (N)`**：一键连续下载当前所有捕获的文件与高清原图；
