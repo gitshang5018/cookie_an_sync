@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信文件传输助手网页版 批量下载工具
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.9
+// @version      2.8.10
 // @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com / szfilehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，下载真实原图与原文件！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
@@ -30,6 +30,7 @@
     const State = {
         items: new Map(),       // uniqueKey -> Item Object
         blobs: new Map(),       // url -> Blob instance
+        elUidCounter: 0,        // DOM 节点唯一标识自增计数器
         filterType: 'all',      // 'all' | 'image' | 'file' | 'video'
         searchQuery: '',
         isAutoScrolling: false,
@@ -358,26 +359,75 @@
 
         const isImage = item.type === 'image';
         const isFile = item.type === 'file';
-        const rawName = item.name || (isImage ? 'image.jpg' : 'file.bin');
+        const isVideo = item.type === 'video';
+        const rawName = item.name || (isImage ? 'image.jpg' : (isVideo ? 'video.mp4' : 'file.bin'));
         const cleanName = isFile ? cleanWechatFileName(rawName) : sanitizeFilename(rawName);
 
         let rawUrl = item.url || '';
-        const msgId = item.rawMsg?.MsgId || item.msgId || extractMsgId(rawUrl);
+        const msgId = item.rawMsg?.MsgId || item.rawMsg?.msg_id || item.rawMsg?.id || item.msgId || extractMsgId(rawUrl);
+        const mediaId = item.mediaId || item.rawMsg?.MediaId || item.rawMsg?.mediaId || item.rawMsg?.attachId || '';
         let hdUrl = isImage ? getHdMediaUrl(rawUrl, msgId) : rawUrl;
         let previewUrl = item.previewUrl || rawUrl || hdUrl;
 
         if (isFile && (!hdUrl || hdUrl.startsWith('#') || hdUrl.startsWith('javascript')) && item.rawMsg) {
-            const builtUrl = buildFileDownloadUrl(item.rawMsg, item.mediaId || item.rawMsg.MediaId, cleanName);
+            const builtUrl = buildFileDownloadUrl(item.rawMsg, mediaId, cleanName);
             if (builtUrl) hdUrl = builtUrl;
         }
 
-        let key = isFile ? `file_${cleanName.toLowerCase()}` : (isImage ? (msgId ? `image_msg_${msgId}` : `image_${hashString(hdUrl || previewUrl)}`) : `video_${msgId || Date.now()}`);
+        // 1. 生成全局唯一键 (Unique Item Key，彻底杜绝按文件名归并覆盖)
+        let key = item.id;
+        if (!key || key.startsWith('file_' + cleanName.toLowerCase())) {
+            if (msgId) {
+                key = `${item.type || 'file'}_msg_${msgId}`;
+            } else if (mediaId) {
+                key = `${item.type || 'file'}_media_${mediaId}`;
+            } else if (item.element) {
+                if (!item.element._wx_uid) {
+                    State.elUidCounter = (State.elUidCounter || 0) + 1;
+                    item.element._wx_uid = `el_${Date.now()}_${State.elUidCounter}`;
+                }
+                key = `${item.type || 'file'}_${item.element._wx_uid}`;
+            } else if (hdUrl && !hdUrl.startsWith('#') && !hdUrl.startsWith('javascript')) {
+                key = `${item.type || 'file'}_${hashString(hdUrl)}`;
+            } else {
+                State.elUidCounter = (State.elUidCounter || 0) + 1;
+                key = `${item.type || 'file'}_anon_${Date.now()}_${State.elUidCounter}`;
+            }
+        }
+
+        // 2. 跨阶段属性合并：若同一资源通过网络或 DOM 再次触发，精准匹配现有项
+        if (!State.items.has(key)) {
+            if (msgId) {
+                for (const [k, ex] of State.items.entries()) {
+                    if (ex.msgId && String(ex.msgId) === String(msgId)) {
+                        key = k;
+                        break;
+                    }
+                }
+            }
+            if (!State.items.has(key) && mediaId) {
+                for (const [k, ex] of State.items.entries()) {
+                    if (ex.mediaId && String(ex.mediaId) === String(mediaId)) {
+                        key = k;
+                        break;
+                    }
+                }
+            }
+            if (!State.items.has(key) && item.element) {
+                for (const [k, ex] of State.items.entries()) {
+                    if (ex.element && ex.element === item.element) {
+                        key = k;
+                        break;
+                    }
+                }
+            }
+        }
 
         if (!State.items.has(key)) {
             let finalName = cleanName;
             if (isImage && (!finalName || finalName.startsWith('image_') || finalName === 'image.jpg')) {
                 const count = Array.from(State.items.values()).filter(x => x.type === 'image').length + 1;
-                finalName = `image_${count}_${msgId ? msgId.slice(-6) : Date.now().toString().slice(-4)}.jpg`;
+                finalName = `image_${count}_${msgId ? String(msgId).slice(-6) : Date.now().toString().slice(-4)}.jpg`;
             }
 
             const newItem = {
@@ -391,7 +441,7 @@
                 formattedSize: item.size ? formatBytes(item.size) : (item.formattedSize || '未知大小'),
                 timeStr: item.timeStr || formatCurrentTime(),
                 timestamp: item.timestamp || Date.now(),
-                mediaId: item.mediaId || '',
+                mediaId: mediaId,
                 msgId: msgId,
                 rawMsg: item.rawMsg || null,
                 element: item.element || null,
@@ -414,10 +464,12 @@
                 existing.formattedSize = formatBytes(item.size);
             }
             if (item.blob && !existing.blob) existing.blob = item.blob;
-            if (item.element) existing.element = item.element;
-            if (item.downloadBtn) existing.downloadBtn = item.downloadBtn;
+            if (item.element && !existing.element) existing.element = item.element;
+            if (item.downloadBtn && !existing.downloadBtn) existing.downloadBtn = item.downloadBtn;
             if (item.rawMsg && !existing.rawMsg) existing.rawMsg = item.rawMsg;
-            if (item.mediaId && !existing.mediaId) existing.mediaId = item.mediaId;
+            if (mediaId && !existing.mediaId) existing.mediaId = mediaId;
+            if (msgId && !existing.msgId) existing.msgId = msgId;
+            if (existing.element) attachInlineTagToElement(existing);
         }
     }
 
@@ -522,7 +574,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.9 engine ready.');
+        console.log('[WeChat Downloader] v2.8.10 engine ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -605,7 +657,7 @@
             }
 
             addItem({
-                id: `file_${fileName.toLowerCase()}`,
+                id: `file_msg_${msgId}`,
                 msgId: msgId,
                 type: 'file',
                 name: fileName,
@@ -634,14 +686,27 @@
         if (!el) return null;
         let curr = el.closest('.msg-item') || el;
         let depth = 0;
-        while (curr && curr !== document.body && depth < 4) {
+        while (curr && curr !== document.body && depth < 5) {
             if (curr.__vueParentComponent) {
                 const comp = curr.__vueParentComponent;
-                const item = comp.props?.item || comp.props?.msg || comp.setupState?.item || comp.setupState?.msg || comp.data?.item;
-                if (item) return item;
+                const item = comp.props?.item || comp.props?.msg || comp.props?.message ||
+                             comp.setupState?.item || comp.setupState?.msg || comp.setupState?.message ||
+                             comp.data?.item || comp.ctx?.item || comp.ctx?.msg;
+                if (item && typeof item === 'object') return item;
             }
-            if (curr.__vnode?.props?.item) return curr.__vnode.props.item;
-            if (curr.__vue__?.item) return curr.__vue__.item;
+            if (curr.__vnode) {
+                const vn = curr.__vnode;
+                const item = vn.props?.item || vn.props?.msg || vn.props?.message;
+                if (item && typeof item === 'object') return item;
+                if (vn.key && typeof vn.key === 'string' && (vn.key.startsWith('msg_') || /^\d+$/.test(vn.key))) {
+                    return { MsgId: vn.key.replace(/^msg_/, '') };
+                }
+            }
+            if (curr.__vue__) {
+                const comp = curr.__vue__;
+                const item = comp.item || comp.msg || comp.message || comp.$props?.item || comp.$props?.msg;
+                if (item && typeof item === 'object') return item;
+            }
             curr = curr.parentElement;
             depth++;
         }
@@ -744,6 +809,7 @@
 
                 if (cleanName) {
                     const compData = extractMsgFromElement(msgEl);
+                    const msgId = compData?.MsgId || compData?.msg_id || compData?.id || compData?.newMsgId || '';
                     const mediaId = compData ? (compData.MediaId || compData.mediaId || compData.attachId) : '';
                     const dlBtn = msgEl.querySelector('.icon__download');
 
@@ -752,8 +818,16 @@
                         href = buildFileDownloadUrl(compData, mediaId, cleanName);
                     }
 
+                    if (!msgEl._wx_uid) {
+                        State.elUidCounter = (State.elUidCounter || 0) + 1;
+                        msgEl._wx_uid = `el_${Date.now()}_${State.elUidCounter}`;
+                    }
+
+                    const uid = msgId ? `file_msg_${msgId}` : (mediaId ? `file_media_${mediaId}` : `file_${msgEl._wx_uid}`);
+
                     addItem({
-                        id: `file_${cleanName.toLowerCase()}`,
+                        id: uid,
+                        msgId: msgId,
                         type: 'file',
                         name: cleanName,
                         url: href || 'javascript:void(0)',
@@ -776,14 +850,21 @@
 
                 if (rawSrc) {
                     const compData = extractMsgFromElement(msgEl);
-                    const msgId = compData?.MsgId || extractMsgId(rawSrc);
+                    const msgId = compData?.MsgId || compData?.msg_id || compData?.id || extractMsgId(rawSrc);
                     const hdUrl = getHdMediaUrl(rawSrc, msgId);
 
+                    if (!msgEl._wx_uid) {
+                        State.elUidCounter = (State.elUidCounter || 0) + 1;
+                        msgEl._wx_uid = `el_${Date.now()}_${State.elUidCounter}`;
+                    }
+
+                    const uid = msgId ? `image_msg_${msgId}` : `image_${msgEl._wx_uid}`;
+
                     addItem({
-                        id: msgId ? `image_msg_${msgId}` : `image_${hashString(rawSrc)}`,
+                        id: uid,
                         msgId: msgId,
                         type: 'image',
-                        name: `image_${msgId || Date.now()}.jpg`,
+                        name: `image_${msgId || State.elUidCounter}.jpg`,
                         url: hdUrl,
                         previewUrl: rawSrc,
                         rawMsg: compData,
@@ -799,14 +880,21 @@
             const videoCard = msgEl.querySelector('.msg-video, video');
             if (videoCard) {
                 const compData = extractMsgFromElement(msgEl);
-                const msgId = compData?.MsgId || ('video_' + Date.now());
+                const msgId = compData?.MsgId || compData?.msg_id || compData?.id || '';
                 const dlBtn = msgEl.querySelector('.icon__download');
 
+                if (!msgEl._wx_uid) {
+                    State.elUidCounter = (State.elUidCounter || 0) + 1;
+                    msgEl._wx_uid = `el_${Date.now()}_${State.elUidCounter}`;
+                }
+
+                const uid = msgId ? `video_${msgId}` : `video_${msgEl._wx_uid}`;
+
                 addItem({
-                    id: `video_${msgId}`,
+                    id: uid,
                     msgId: msgId,
                     type: 'video',
-                    name: `video_${msgId}.mp4`,
+                    name: `video_${msgId || State.elUidCounter}.mp4`,
                     url: `/cgi-bin/mmwebwx-bin/webwxgetvideo?msgid=${msgId}`,
                     previewUrl: '',
                     rawMsg: compData,

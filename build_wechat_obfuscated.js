@@ -1,7 +1,7 @@
 import fs from 'fs';
 import { execSync } from 'child_process';
 
-console.log('--- 开始构建微信助手混淆版 v2.8.9 ---');
+console.log('--- 开始构建微信助手混淆版 v2.8.10 ---');
 
 const sourceFile = './wechat_filehelper_batch_downloader.source.user.js';
 const outputFile = './wechat_filehelper_batch_downloader.user.js';
