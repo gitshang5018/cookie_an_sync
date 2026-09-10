@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信文件传输助手网页版 批量下载工具
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.10
+// @version      2.8.11
 // @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com / szfilehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，下载真实原图与原文件！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
@@ -148,6 +148,20 @@
 
     function sanitizeFilename(name) {
         return (name || ('file_' + Date.now())).replace(/[\\/:*?"<>|]/g, '_').trim();
+    }
+
+    function isSameFileName(name1, name2) {
+        if (!name1 || !name2) return false;
+        const n1 = name1.trim().toLowerCase();
+        const n2 = name2.trim().toLowerCase();
+        if (n1 === n2) return true;
+        if (n1.replace(/\s+/g, '') === n2.replace(/\s+/g, '')) return true;
+        if (n1.length > 15 && n2.length > 15) {
+            if (n1.startsWith(n2.slice(0, 20)) || n2.startsWith(n1.slice(0, 20))) {
+                return true;
+            }
+        }
+        return false;
     }
 
     function formatBytes(bytes, decimals = 1) {
@@ -397,6 +411,7 @@
 
         // 2. 跨阶段属性合并：若同一资源通过网络或 DOM 再次触发，精准匹配现有项
         if (!State.items.has(key)) {
+            // 2.1 匹配 MsgId
             if (msgId) {
                 for (const [k, ex] of State.items.entries()) {
                     if (ex.msgId && String(ex.msgId) === String(msgId)) {
@@ -405,6 +420,7 @@
                     }
                 }
             }
+            // 2.2 匹配 MediaId
             if (!State.items.has(key) && mediaId) {
                 for (const [k, ex] of State.items.entries()) {
                     if (ex.mediaId && String(ex.mediaId) === String(mediaId)) {
@@ -413,11 +429,34 @@
                     }
                 }
             }
+            // 2.3 匹配已绑定的 DOM Element
             if (!State.items.has(key) && item.element) {
                 for (const [k, ex] of State.items.entries()) {
                     if (ex.element && ex.element === item.element) {
                         key = k;
                         break;
+                    }
+                }
+            }
+            // 2.4 DOM 扫描匹配网络项：当前有 DOM 元素但未提取出 msgId 时，按文件名顺序匹配尚未绑定 element 的网络项
+            if (!State.items.has(key) && item.element && !msgId) {
+                for (const [k, ex] of State.items.entries()) {
+                    if (ex.type === (item.type || 'file') && !ex.element) {
+                        if (isSameFileName(ex.name, cleanName)) {
+                            key = k;
+                            break;
+                        }
+                    }
+                }
+            }
+            // 2.5 网络项匹配 DOM 项：当前来自网络（有 msgId，无 element）时，按文件名顺序匹配尚未关联 msgId 的 DOM 项
+            if (!State.items.has(key) && !item.element && msgId) {
+                for (const [k, ex] of State.items.entries()) {
+                    if (ex.type === (item.type || 'file') && !ex.msgId) {
+                        if (isSameFileName(ex.name, cleanName)) {
+                            key = k;
+                            break;
+                        }
                     }
                 }
             }
@@ -463,6 +502,9 @@
                 existing.size = item.size;
                 existing.formattedSize = formatBytes(item.size);
             }
+            if (item.formattedSize && (!existing.formattedSize || existing.formattedSize === '未知大小')) {
+                existing.formattedSize = item.formattedSize;
+            }
             if (item.blob && !existing.blob) existing.blob = item.blob;
             if (item.element && !existing.element) existing.element = item.element;
             if (item.downloadBtn && !existing.downloadBtn) existing.downloadBtn = item.downloadBtn;
@@ -470,6 +512,7 @@
             if (mediaId && !existing.mediaId) existing.mediaId = mediaId;
             if (msgId && !existing.msgId) existing.msgId = msgId;
             if (existing.element) attachInlineTagToElement(existing);
+            updateNativeUIState();
         }
     }
 
@@ -574,7 +617,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.10 engine ready.');
+        console.log('[WeChat Downloader] v2.8.11 engine ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -812,6 +855,8 @@
                     const msgId = compData?.MsgId || compData?.msg_id || compData?.id || compData?.newMsgId || '';
                     const mediaId = compData ? (compData.MediaId || compData.mediaId || compData.attachId) : '';
                     const dlBtn = msgEl.querySelector('.icon__download');
+                    const descEl = msgEl.querySelector('.msg-file__desc, .msg-file__size, .msg-file__info');
+                    const formattedSize = descEl ? descEl.textContent.trim() : '';
 
                     let href = '';
                     if (compData || mediaId) {
@@ -832,6 +877,7 @@
                         name: cleanName,
                         url: href || 'javascript:void(0)',
                         mediaId: mediaId,
+                        formattedSize: formattedSize,
                         rawMsg: compData,
                         element: msgEl,
                         downloadBtn: dlBtn
