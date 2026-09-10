@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         微信文件传输助手网页版 批量下载工具
 // @namespace    https://github.com/wechat-filehelper-downloader
-// @version      2.8.11
+// @version      2.8.12
 // @description  精准捕获微信文件传输助手网页版（filehelper.weixin.qq.com / szfilehelper.weixin.qq.com）中全部真实文件（PDF/Word/Excel/CDR/RAR等）、高清原图和视频，工具栏无缝融入底部文件上传图标所在行，后台全量抓取+一次性极速落盘，下载真实原图与原文件！
 // @author       Antigravity
 // @match        https://filehelper.weixin.qq.com/*
@@ -388,24 +388,17 @@
             if (builtUrl) hdUrl = builtUrl;
         }
 
-        // 1. 生成全局唯一键 (Unique Item Key，彻底杜绝按文件名归并覆盖)
+        // 1. 生成全局唯一键 (彻底杜绝随机不稳定的 key，保障多轮扫描严格幂等)
         let key = item.id;
-        if (!key || key.startsWith('file_' + cleanName.toLowerCase())) {
+        if (!key) {
             if (msgId) {
                 key = `${item.type || 'file'}_msg_${msgId}`;
             } else if (mediaId) {
                 key = `${item.type || 'file'}_media_${mediaId}`;
-            } else if (item.element) {
-                if (!item.element._wx_uid) {
-                    State.elUidCounter = (State.elUidCounter || 0) + 1;
-                    item.element._wx_uid = `el_${Date.now()}_${State.elUidCounter}`;
-                }
-                key = `${item.type || 'file'}_${item.element._wx_uid}`;
             } else if (hdUrl && !hdUrl.startsWith('#') && !hdUrl.startsWith('javascript')) {
                 key = `${item.type || 'file'}_${hashString(hdUrl)}`;
             } else {
-                State.elUidCounter = (State.elUidCounter || 0) + 1;
-                key = `${item.type || 'file'}_anon_${Date.now()}_${State.elUidCounter}`;
+                key = `${item.type || 'file'}_${cleanName.toLowerCase()}_#0`;
             }
         }
 
@@ -438,11 +431,12 @@
                     }
                 }
             }
-            // 2.4 DOM 扫描匹配网络项：当前有 DOM 元素但未提取出 msgId 时，按文件名顺序匹配尚未绑定 element 的网络项
+            // 2.4 DOM 扫描匹配网络项：当前有 DOM 元素但未提取出 msgId 时，按文件名顺序匹配尚未绑定有效 element 的网络项
             if (!State.items.has(key) && item.element && !msgId) {
                 for (const [k, ex] of State.items.entries()) {
-                    if (ex.type === (item.type || 'file') && !ex.element) {
-                        if (isSameFileName(ex.name, cleanName)) {
+                    if (ex.type === (item.type || 'file')) {
+                        const needsElement = !ex.element || (typeof document !== 'undefined' && document.body && !document.body.contains(ex.element));
+                        if (needsElement && isSameFileName(ex.name, cleanName)) {
                             key = k;
                             break;
                         }
@@ -506,8 +500,10 @@
                 existing.formattedSize = item.formattedSize;
             }
             if (item.blob && !existing.blob) existing.blob = item.blob;
-            if (item.element && !existing.element) existing.element = item.element;
-            if (item.downloadBtn && !existing.downloadBtn) existing.downloadBtn = item.downloadBtn;
+            if (item.element) {
+                existing.element = item.element;
+                if (item.downloadBtn) existing.downloadBtn = item.downloadBtn;
+            }
             if (item.rawMsg && !existing.rawMsg) existing.rawMsg = item.rawMsg;
             if (mediaId && !existing.mediaId) existing.mediaId = mediaId;
             if (msgId && !existing.msgId) existing.msgId = msgId;
@@ -617,7 +613,7 @@
             return response;
         };
 
-        console.log('[WeChat Downloader] v2.8.11 engine ready.');
+        console.log('[WeChat Downloader] v2.8.12 engine ready.');
     }
 
     function parseApiResponse(url, responseText) {
@@ -730,26 +726,53 @@
         let curr = el.closest('.msg-item') || el;
         let depth = 0;
         while (curr && curr !== document.body && depth < 5) {
+            // 1. 检查 DOM 属性与 dataset (data-id, data-msg-id, data-msgid, data-mid, id)
+            const attrMsgId = curr.getAttribute?.('data-id') || 
+                              curr.getAttribute?.('data-msg-id') || 
+                              curr.getAttribute?.('data-msgid') || 
+                              curr.getAttribute?.('data-mid') || 
+                              curr.dataset?.id || curr.dataset?.msgid || curr.dataset?.msgId ||
+                              (curr.id && curr.id.startsWith('msg_') ? curr.id.replace(/^msg_/, '') : '');
+            if (attrMsgId) {
+                return { MsgId: String(attrMsgId) };
+            }
+
+            // 2. 检查 Vue 3 parent component
             if (curr.__vueParentComponent) {
                 const comp = curr.__vueParentComponent;
                 const item = comp.props?.item || comp.props?.msg || comp.props?.message ||
+                             comp.props?.modelValue || comp.props?.msgItem || comp.props?.file ||
                              comp.setupState?.item || comp.setupState?.msg || comp.setupState?.message ||
                              comp.data?.item || comp.ctx?.item || comp.ctx?.msg;
                 if (item && typeof item === 'object') return item;
-            }
-            if (curr.__vnode) {
-                const vn = curr.__vnode;
-                const item = vn.props?.item || vn.props?.msg || vn.props?.message;
-                if (item && typeof item === 'object') return item;
-                if (vn.key && typeof vn.key === 'string' && (vn.key.startsWith('msg_') || /^\d+$/.test(vn.key))) {
-                    return { MsgId: vn.key.replace(/^msg_/, '') };
+                if (comp.vnode?.key != null) {
+                    const vk = String(comp.vnode.key);
+                    if (vk && vk !== 'null' && vk !== 'undefined') {
+                        return { MsgId: vk.replace(/^msg_/, '') };
+                    }
                 }
             }
+
+            // 3. 检查 Vue 3 vnode
+            if (curr.__vnode) {
+                const vn = curr.__vnode;
+                const item = vn.props?.item || vn.props?.msg || vn.props?.message || vn.props?.modelValue;
+                if (item && typeof item === 'object') return item;
+                if (vn.key != null) {
+                    const vk = String(vn.key);
+                    if (vk && vk !== 'null' && vk !== 'undefined') {
+                        return { MsgId: vk.replace(/^msg_/, '') };
+                    }
+                }
+            }
+
+            // 4. 检查 Vue 2 兼容
             if (curr.__vue__) {
                 const comp = curr.__vue__;
                 const item = comp.item || comp.msg || comp.message || comp.$props?.item || comp.$props?.msg;
                 if (item && typeof item === 'object') return item;
             }
+
             curr = curr.parentElement;
             depth++;
         }
@@ -838,6 +861,11 @@
         const msgItems = chatBody.querySelectorAll('.msg-item');
         let scannedCount = 0;
 
+        // 同一次扫描中，同名同大小文件的出现频次计数器 (保障多轮扫描产生绝对一致确定的 key)
+        const fileOccurrences = new Map();
+        const imageOccurrences = new Map();
+        const videoOccurrences = new Map();
+
         msgItems.forEach(msgEl => {
             // 安全屏障：跳过任何正在上传或发送中的临时消息卡片，防止干扰微信文件发送与界面渲染
             if (isMsgSending(msgEl)) return;
@@ -863,12 +891,12 @@
                         href = buildFileDownloadUrl(compData, mediaId, cleanName);
                     }
 
-                    if (!msgEl._wx_uid) {
-                        State.elUidCounter = (State.elUidCounter || 0) + 1;
-                        msgEl._wx_uid = `el_${Date.now()}_${State.elUidCounter}`;
-                    }
+                    // 确定性 Key：使用名称+规格+按序索引，保障即使多次扫描或 Vue 虚拟重绘，相同的消息卡片 key 恒定一致
+                    const occKey = `${cleanName.toLowerCase()}_${formattedSize.toLowerCase().replace(/\s+/g, '')}`;
+                    const occIndex = fileOccurrences.get(occKey) || 0;
+                    fileOccurrences.set(occKey, occIndex + 1);
 
-                    const uid = msgId ? `file_msg_${msgId}` : (mediaId ? `file_media_${mediaId}` : `file_${msgEl._wx_uid}`);
+                    const uid = msgId ? `file_msg_${msgId}` : (mediaId ? `file_media_${mediaId}` : `file_dom_${occKey}_#${occIndex}`);
 
                     addItem({
                         id: uid,
@@ -899,18 +927,17 @@
                     const msgId = compData?.MsgId || compData?.msg_id || compData?.id || extractMsgId(rawSrc);
                     const hdUrl = getHdMediaUrl(rawSrc, msgId);
 
-                    if (!msgEl._wx_uid) {
-                        State.elUidCounter = (State.elUidCounter || 0) + 1;
-                        msgEl._wx_uid = `el_${Date.now()}_${State.elUidCounter}`;
-                    }
+                    const occKey = rawSrc && !rawSrc.startsWith('blob:') ? hashString(rawSrc) : 'img';
+                    const occIndex = imageOccurrences.get(occKey) || 0;
+                    imageOccurrences.set(occKey, occIndex + 1);
 
-                    const uid = msgId ? `image_msg_${msgId}` : `image_${msgEl._wx_uid}`;
+                    const uid = msgId ? `image_msg_${msgId}` : `image_dom_${occKey}_#${occIndex}`;
 
                     addItem({
                         id: uid,
                         msgId: msgId,
                         type: 'image',
-                        name: `image_${msgId || State.elUidCounter}.jpg`,
+                        name: `image_${msgId || (occIndex + 1)}.jpg`,
                         url: hdUrl,
                         previewUrl: rawSrc,
                         rawMsg: compData,
@@ -929,18 +956,16 @@
                 const msgId = compData?.MsgId || compData?.msg_id || compData?.id || '';
                 const dlBtn = msgEl.querySelector('.icon__download');
 
-                if (!msgEl._wx_uid) {
-                    State.elUidCounter = (State.elUidCounter || 0) + 1;
-                    msgEl._wx_uid = `el_${Date.now()}_${State.elUidCounter}`;
-                }
+                const occIndex = videoOccurrences.get('video') || 0;
+                videoOccurrences.set('video', occIndex + 1);
 
-                const uid = msgId ? `video_${msgId}` : `video_${msgEl._wx_uid}`;
+                const uid = msgId ? `video_${msgId}` : `video_dom_#${occIndex}`;
 
                 addItem({
                     id: uid,
                     msgId: msgId,
                     type: 'video',
-                    name: `video_${msgId || State.elUidCounter}.mp4`,
+                    name: `video_${msgId || (occIndex + 1)}.mp4`,
                     url: `/cgi-bin/mmwebwx-bin/webwxgetvideo?msgid=${msgId}`,
                     previewUrl: '',
                     rawMsg: compData,
@@ -976,17 +1001,18 @@
                 if (mut.addedNodes.length > 0) {
                     for (const node of mut.addedNodes) {
                         if (node.nodeType === 1) {
-                            // 忽略脚本内部创建的 UI、进度条、Toast、输入操作栏等
+                            // 忽略脚本内部创建的 UI、标签及其子节点、进度条、Toast、输入操作栏等
                             if (node.classList?.contains('wx-msg-download-tag') || 
+                                node.closest?.('.wx-msg-download-tag') ||
                                 node.closest?.('.wx-input-operations-bar') ||
                                 node.closest?.('.wx-native-progress-container') ||
-                                node.id === 'wx-toast-container') {
+                                node.id === 'wx-toast-container' ||
+                                node.closest?.('#wx-toast-container')) {
                                 continue;
                             }
-                            // 仅当新增节点包含消息列表项时触发扫描
+                            // 仅当新增节点包含真实消息列表项时触发扫描
                             if (node.classList?.contains('msg-item') || 
-                                node.querySelector?.('.msg-item') ||
-                                node.closest?.('#chatBody, .chat-panel__body, .chat-panel__messages')) {
+                                node.querySelector?.('.msg-item')) {
                                 shouldScan = true;
                                 break;
                             }
@@ -1244,12 +1270,27 @@
         let successCount = 0;
         let failCount = 0;
 
+        const savedNameCount = new Map();
         for (let i = 0; i < fetchedList.length; i++) {
             const { item, blob, name } = fetchedList[i];
+            const lowerName = (name || 'file.bin').toLowerCase();
+            const count = savedNameCount.get(lowerName) || 0;
+            savedNameCount.set(lowerName, count + 1);
+
+            let saveName = name;
+            if (count > 0) {
+                const dotIdx = name.lastIndexOf('.');
+                if (dotIdx > 0) {
+                    saveName = `${name.slice(0, dotIdx)} (${count})${name.slice(dotIdx)}`;
+                } else {
+                    saveName = `${name} (${count})`;
+                }
+            }
+
             try {
                 // 1. 如果成功抓取到高清原图或真实文件的 Blob，直接落盘
-                if (blob && isRealBinaryBlob(blob, name)) {
-                    saveBlob(blob, name);
+                if (blob && isRealBinaryBlob(blob, saveName)) {
+                    saveBlob(blob, saveName);
                     successCount++;
                 }
                 // 2. 如果后台请求未鉴权，直接触发微信官方绿色下载按钮 (图片与文件均有该按钮，直达官方原图原件通道)
@@ -1259,7 +1300,7 @@
                 }
                 // 3. 兜底直下有效 URL (非 HTML 页面)
                 else if (item.url && !item.url.startsWith('#') && !item.url.startsWith('javascript')) {
-                    saveDirectUrl(item.url, name);
+                    saveDirectUrl(item.url, saveName);
                     successCount++;
                 } else {
                     failCount++;
